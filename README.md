@@ -68,6 +68,34 @@
 
 Плата визначається як `/dev/cu.usbmodem2101` (вбудований USB-Serial/JTAG, без окремого UART-моста).
 
+## Збірка / як почати
+
+Потрібен **ESP-IDF v5.5** ([інструкція встановлення](https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32s3/get-started/)).
+
+```bash
+git clone <URL-цього-репозиторію>
+cd <тека>/gadget
+
+# 1. Ключі (файли в .gitignore — впишіть свої):
+cp main/groq_key.h.example main/groq_key.h
+#    → вставте ключ Groq з https://console.groq.com/keys (для асистента)
+#    Wi-Fi у gadget вводиться з пристрою (Налаштування → Wi-Fi), файл не потрібен.
+
+# 2. Збірка і прошивка (порт зазвичай /dev/cu.usbmodemXXXX або /dev/ttyACM0):
+. $IDF_PATH/export.sh
+idf.py set-target esp32s3
+idf.py -p <ПОРТ> flash monitor
+```
+
+Перше складання підтягне залежності (LVGL 9, Helix MP3, led_strip) через ESP-IDF
+Component Manager автоматично.
+
+**Проєкти в репозиторії:**
+- `gadget/` — **основна прошивка** (усе описане нижче). Збирайте саме її.
+- `radio/` — окреме інтернет-радіо (Wi-Fi через `wifi_creds.h`: `cp main/wifi_creds.h.example main/wifi_creds.h`).
+- `firmware/` — базовий каркас-демо (дисплей + кнопки).
+- `display-probe/` — діагностичні скетчі (пошук розпіновки, тести периферії).
+
 ## Стан проєкту
 
 - `gadget/` — **головна прошивка** (робочий стіл робота). Головний екран:
