@@ -1,0 +1,5 @@
+/* Скопіюйте у wifi_creds.h і впишіть свою мережу (лише для проєкту radio/). */
+#pragma once
+
+#define WIFI_SSID "НАЗВА_МЕРЕЖІ"
+#define WIFI_PASS "ПАРОЛЬ"

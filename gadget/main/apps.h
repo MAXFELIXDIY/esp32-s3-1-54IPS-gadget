@@ -1,0 +1,30 @@
+#pragma once
+#include "lvgl.h"
+
+#define BTN_LEFT_ID  0
+#define BTN_MID_ID   1
+#define BTN_RIGHT_ID 2
+
+typedef struct {
+    const char *name;
+    void (*open)(lv_obj_t *scr);
+    void (*close)(void);
+    void (*on_btn)(int btn);
+} app_t;
+
+extern const app_t app_wifi;
+extern const app_t app_weather;
+extern const app_t app_radio;
+extern const app_t app_news;
+extern const app_t app_settings;
+extern const app_t app_gemini;
+extern const app_t app_ble;
+extern const app_t app_modules;
+extern const app_t app_light;
+
+/* керування підсвіткою (реалізовано в main.c) */
+void ui_backlight_set(uint8_t duty);
+
+LV_FONT_DECLARE(font_ua_16);
+LV_FONT_DECLARE(font_ua_20);
+LV_FONT_DECLARE(font_num_34);

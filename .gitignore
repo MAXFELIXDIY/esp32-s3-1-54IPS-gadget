@@ -1,0 +1,17 @@
+# ESP-IDF build artifacts
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+*.bak
+
+# Секрети — НЕ комітити (є .example-шаблони)
+**/groq_key.h
+**/gemini_key.h
+**/wifi_creds.h
+
+# macOS / редактори
+.DS_Store
+.vscode/
+*.swp

@@ -1,0 +1,5 @@
+/* Ключ Groq API (console.groq.com/keys) — скопіюйте у groq_key.h і впишіть свій.
+   Використовується для Whisper (розпізнавання) і Llama (відповіді). */
+#pragma once
+
+#define GROQ_KEY "gsk_ВАШ_КЛЮЧ_ТУТ"

@@ -1,0 +1,4 @@
+dependencies:
+  lvgl/lvgl: "^9.2.0"
+  chmorgan/esp-libhelix-mp3: "^1.0.3"
+  espressif/led_strip: "^3.0.0"
