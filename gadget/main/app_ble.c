@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_attr.h"
 #include "lvgl.h"
 #include "apps.h"
 #include "netcfg.h"
@@ -20,10 +21,10 @@
 
 static const char *APPTAG = "app_ble";
 
-typedef enum { V_LIST, V_DETAIL, V_DECODED } view_t;
+typedef enum { V_LIST, V_DETAIL, V_DECODED, V_NOTIF } view_t;
 static view_t s_view;
 
-static ble_dev_t s_buf[BLE_MAX_DEVS];
+EXT_RAM_BSS_ATTR static ble_dev_t s_buf[BLE_MAX_DEVS];
 static int s_n, s_sel;
 static ble_dev_t s_target;
 
@@ -39,7 +40,72 @@ static lv_timer_t *s_click;           /* одноразовий для дете�
 
 #define SCAN_MS 5000
 
+/* біти властивостей GATT-характеристики (стандарт BLE) */
+#define PROP_READ     0x02
+#define PROP_WRITE    0x08
+#define PROP_NOTIFY   0x10
+#define PROP_INDICATE 0x20
+
 static void decoded_render(void);
+static void notif_render(void);
+
+/* ---------- утиліти байтів ---------- */
+
+/* hex-рядок "AA BB CC" з обмеженням довжини вихідного буфера */
+static void hex_str(const uint8_t *b, int len, char *out, int outsz)
+{
+    int p = 0;
+    for (int i = 0; i < len && p + 3 < outsz; i++)
+        p += snprintf(out + p, outsz - p, "%02X ", b[i]);
+    if (p > 0) out[p - 1] = 0; else out[0] = 0;
+}
+
+/* ASCII-подання: друковані символи як є, решта — '.' */
+static void ascii_str(const uint8_t *b, int len, char *out, int outsz)
+{
+    int i = 0;
+    for (; i < len && i < outsz - 1; i++)
+        out[i] = (b[i] >= 0x20 && b[i] < 0x7F) ? (char)b[i] : '.';
+    out[i] = 0;
+}
+
+/* назва типу AD-структури (GAP AD Type) */
+static const char *ad_type_name(uint8_t t)
+{
+    switch (t) {
+    case 0x01: return "Flags";
+    case 0x02: case 0x03: return "UUID16";
+    case 0x06: case 0x07: return "UUID128";
+    case 0x08: case 0x09: return "Назва";
+    case 0x0A: return "TX Power";
+    case 0x16: return "Service Data";
+    case 0x19: return "Вигляд";
+    case 0xFF: return "Mfg Data";
+    default:   return "?";
+    }
+}
+
+/* картка "ключ / значення" у список */
+static void kv_card(const char *key, uint32_t key_color, const char *value)
+{
+    lv_obj_t *row = lv_obj_create(s_root);
+    lv_obj_set_width(row, 210);
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_radius(row, 6, 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x161D26), 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 6, 0);
+    lv_obj_set_scrollbar_mode(row, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+    lv_obj_t *k = lv_label_create(row);
+    lv_label_set_text(k, key);
+    lv_obj_set_style_text_color(k, lv_color_hex(key_color), 0);
+    lv_obj_t *v = lv_label_create(row);
+    lv_label_set_text(v, value);
+    lv_obj_set_width(v, 196);
+    lv_label_set_long_mode(v, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(v, lv_color_hex(0xFFFFFF), 0);
+}
 
 /* ---------- спінер ---------- */
 
@@ -56,10 +122,18 @@ static void show_spinner(const char *caption)
     lv_obj_set_style_text_color(l, lv_color_hex(0x8A94A0), 0);
 }
 
+/* Захист від гонки виходу: якщо застосунок закрили, поки ble_init_task ще
+   ініціалізує NimBLE, треба гарантувати зупинку BLE (інакше радіо лишиться
+   ввімкненим, а Wi-Fi — вимкненим). ble_stop() ідемпотентний. */
+static volatile bool s_app_open;
+static volatile bool s_init_running;
+
 static void ble_init_task(void *arg)
 {
     netcfg_wifi_stop();   /* блокуюче — поза UI-потоком */
     ble_start();
+    s_init_running = false;                 /* спершу знімаємо прапорець... */
+    if (!s_app_open) ble_stop();            /* ...потім перевіряємо — без гонки */
     vTaskDelete(NULL);
 }
 
@@ -130,6 +204,12 @@ static void list_tick(lv_timer_t *t)
         if (st != last) { last = st; decoded_render(); }
         return;
     }
+    if (s_view == V_NOTIF) {
+        static uint32_t last_cnt = 0;
+        uint32_t c = ble_gatt_notif_count();
+        if (c != last_cnt) { last_cnt = c; notif_render(); }
+        return;
+    }
     if (s_view != V_LIST) return;
     if (!ble_is_ready()) {
         lv_label_set_text_fmt(s_title, "BLE: %s", ble_stage());
@@ -165,17 +245,6 @@ static void new_search(void)
     ble_scan_resume();
     lv_obj_clean(s_root);
     s_built_n = -1;                       /* примусити перебудову */
-}
-
-static void go_list(void)
-{
-    s_view = V_LIST;
-    if (s_timer) lv_timer_resume(s_timer);
-    s_n = ble_dev_snapshot(s_buf, BLE_MAX_DEVS);
-    if (s_sel >= s_n) s_sel = s_n ? s_n - 1 : 0;
-    lv_label_set_text_fmt(s_title, s_frozen ? "BLE (%d)" : "Пошук... %d", s_n);
-    s_built_n = -1;
-    list_build();
 }
 
 /* ---------- деталі ---------- */
@@ -215,12 +284,30 @@ static void show_detail(void)
     else lv_label_set_text(co, "Виробник: —");
     lv_obj_set_style_text_color(co, lv_color_hex(0xC0C8D0), 0);
 
-    lv_obj_t *ad = lv_label_create(s_root);
-    lv_label_set_text_fmt(ad, "Реклама: %d байт", s_target.adv_len);
-    lv_obj_set_style_text_color(ad, lv_color_hex(0x5A6672), 0);
+    /* --- сирі байти реклами + розбір AD-структур --- */
+    char hx[3 * BLE_ADV_MAX + 4];
+    hex_str(s_target.adv, s_target.adv_len, hx, sizeof(hx));
+    char cap[24];
+    snprintf(cap, sizeof(cap), "Реклама (%d Б)", s_target.adv_len);
+    kv_card(cap, 0x35C4F0, hx[0] ? hx : "—");
+
+    /* прохід TLV: [len][type][data...] */
+    for (int i = 0; i + 1 < s_target.adv_len; ) {
+        int L = s_target.adv[i];
+        if (L == 0 || i + 1 + L > s_target.adv_len) break;
+        uint8_t type = s_target.adv[i + 1];
+        const uint8_t *d = &s_target.adv[i + 2];
+        int dl = L - 1;
+        char key[40], val[3 * 32 + 8];
+        snprintf(key, sizeof(key), "0x%02X %s", type, ad_type_name(type));
+        if (type == 0x08 || type == 0x09) ascii_str(d, dl, val, sizeof(val));
+        else hex_str(d, dl > 31 ? 31 : dl, val, sizeof(val));
+        kv_card(key, 0x8A94A0, val[0] ? val : "—");
+        i += 1 + L;
+    }
 
     lv_obj_t *hint = lv_label_create(s_root);
-    lv_label_set_text(hint, "\nцентр — зчитати дані");
+    lv_label_set_text(hint, "\n–/+ гортати • центр — зчитати сервіси");
     lv_obj_set_style_text_color(hint, lv_color_hex(0x35C4F0), 0);
 }
 
@@ -243,33 +330,85 @@ static void decoded_render(void)
     if (st == GATT_DONE || st == GATT_READING) {
         ble_char_t chars[BLE_MAX_CHARS];
         int n = ble_gatt_chars(chars, BLE_MAX_CHARS);
-        char nm[40], vl[64];
-        int shown = 0;
+        char nm[40], vl[176];
         for (int i = 0; i < n; i++) {
-            if (!ble_decode_char(&chars[i], nm, sizeof(nm), vl, sizeof(vl))) continue;
-            shown++;
-            lv_obj_t *row = lv_obj_create(s_root);
-            lv_obj_set_width(row, 210);
-            lv_obj_set_height(row, LV_SIZE_CONTENT);
-            lv_obj_set_style_radius(row, 6, 0);
-            lv_obj_set_style_bg_color(row, lv_color_hex(0x161D26), 0);
-            lv_obj_set_style_border_width(row, 0, 0);
-            lv_obj_set_style_pad_all(row, 6, 0);
-            lv_obj_set_scrollbar_mode(row, LV_SCROLLBAR_MODE_OFF);
-            lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
-            lv_obj_t *k = lv_label_create(row);
-            lv_label_set_text(k, nm);
-            lv_obj_set_style_text_color(k, lv_color_hex(0x35C4F0), 0);
-            lv_obj_t *vv = lv_label_create(row);
-            lv_label_set_text(vv, vl);
-            lv_obj_set_style_text_color(vv, lv_color_hex(0xFFFFFF), 0);
+            ble_char_t *c = &chars[i];
+            /* ключ: людяна назва (якщо відома) або UUID + прапорці властивостей */
+            char key[64], props[8] = "";
+            int pp = 0;
+            if (c->props & PROP_READ)   props[pp++] = 'R';
+            if (c->props & PROP_WRITE)  props[pp++] = 'W';
+            if (c->props & PROP_NOTIFY) props[pp++] = 'N';
+            if (c->props & PROP_INDICATE) props[pp++] = 'I';
+            props[pp] = 0;
+            if (ble_decode_char(c, nm, sizeof(nm), vl, sizeof(vl))) {
+                snprintf(key, sizeof(key), "%s  [%s]", nm, props);
+                kv_card(key, 0x4ADE80, vl);
+            } else {
+                if (c->is128) {
+                    const uint8_t *u = c->uuid128;   /* NimBLE: little-endian */
+                    snprintf(key, sizeof(key),
+                        "%02X%02X%02X%02X-…-%02X%02X  [%s]",
+                        u[15], u[14], u[13], u[12], u[1], u[0], props);
+                } else {
+                    snprintf(key, sizeof(key), "UUID 0x%04X  [%s]", c->uuid16, props);
+                }
+                /* значення: hex + ASCII */
+                if (c->read_ok && c->val_len) {
+                    char hx[3 * 40 + 2], as[42];
+                    hex_str(c->val, c->val_len, hx, sizeof(hx));
+                    ascii_str(c->val, c->val_len, as, sizeof(as));
+                    snprintf(vl, sizeof(vl), "%s\n\"%s\"", hx, as);
+                    kv_card(key, 0x35C4F0, vl);
+                } else {
+                    kv_card(key, 0x35C4F0, (c->props & PROP_READ)
+                            ? "(порожньо)" : "(не читається)");
+                }
+            }
         }
-        if (st == GATT_DONE && shown == 0) {
-            lv_obj_t *e = lv_label_create(s_root);
-            lv_label_set_text(e, "Стандартних даних немає\n(немає відомих характеристик)");
-            lv_obj_set_style_text_color(e, lv_color_hex(0x8A94A0), 0);
+        if (st == GATT_DONE) {
+            lv_obj_t *h = lv_label_create(s_root);
+            lv_label_set_text(h, "\n–/+ гортати • центр — перехопити потік");
+            lv_obj_set_style_text_color(h, lv_color_hex(0xFACC15), 0);
         }
     }
+}
+
+/* ---------- перехоплення потоку (notify) ---------- */
+
+static void notif_render(void)
+{
+    lv_obj_clean(s_root);
+    ble_notif_t ns[BLE_MAX_NOTIF];
+    int n = ble_gatt_notif_snapshot(ns, BLE_MAX_NOTIF);
+    if (n == 0) {
+        lv_obj_t *m = lv_label_create(s_root);
+        lv_label_set_text(m, "Очікую сповіщень від пристрою...\n(пристрій має щось надсилати)");
+        lv_obj_set_style_text_color(m, lv_color_hex(0x8A94A0), 0);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        char key[48], val[176];
+        if (ns[i].uuid16) snprintf(key, sizeof(key), "0x%04X  #%d", ns[i].uuid16, n - i);
+        else snprintf(key, sizeof(key), "handle %u  #%d", ns[i].handle, n - i);
+        char hx[3 * 40 + 2], as[42];
+        hex_str(ns[i].val, ns[i].val_len, hx, sizeof(hx));
+        ascii_str(ns[i].val, ns[i].val_len, as, sizeof(as));
+        snprintf(val, sizeof(val), "%s\n\"%s\"", hx, as);
+        kv_card(key, 0xFACC15, val);
+    }
+}
+
+static void show_notif(void)
+{
+    s_view = V_NOTIF;
+    lv_label_set_text(s_title, "Перехоплення");
+    lv_obj_clean(s_root);
+    lv_obj_set_flex_align(s_root, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    ble_gatt_subscribe_all();
+    if (s_timer) lv_timer_resume(s_timer);
+    notif_render();
 }
 
 static void show_decoded(void)
@@ -322,6 +461,8 @@ static void ble_open(lv_obj_t *scr)
 
     show_spinner("Вмикаю Bluetooth...");
     ESP_LOGI(APPTAG, "ble_open: UI готовий, фонова ініціалізація");
+    s_app_open = true;
+    s_init_running = true;
     xTaskCreate(ble_init_task, "ble_init", 4096, NULL, 4, NULL);
 
     s_timer = lv_timer_create(list_tick, 400, NULL);
@@ -331,9 +472,22 @@ static void ble_open(lv_obj_t *scr)
 
 static void ble_close(void)
 {
+    s_app_open = false;   /* сигналимо ble_init_task, що застосунок закрито */
     if (s_click) { lv_timer_delete(s_click); s_click = NULL; }
     if (s_timer) { lv_timer_delete(s_timer); s_timer = NULL; }
-    ble_stop();          /* меню потім увімкне Wi-Fi назад */
+    /* якщо ініціалізація ще триває — зупинку зробить сам ble_init_task
+       (перевіряє s_app_open). Інакше зупиняємо тут. ble_stop ідемпотентний. */
+    if (!s_init_running) ble_stop();   /* меню потім увімкне Wi-Fi назад */
+}
+
+/* прокрутка вмісту: dir<0 — вгору, dir>0 — вниз (обмежено краями) */
+static void scroll_step(int dir)
+{
+    int32_t room = dir > 0 ? lv_obj_get_scroll_bottom(s_root)
+                           : lv_obj_get_scroll_top(s_root);
+    if (room <= 0) return;
+    int32_t d = room < 80 ? room : 80;
+    lv_obj_scroll_by(s_root, 0, dir > 0 ? -d : d, LV_ANIM_ON);
 }
 
 static void ble_btn(int btn)
@@ -360,10 +514,18 @@ static void ble_btn(int btn)
             }
         }
     } else if (s_view == V_DETAIL) {
-        if (btn == BTN_MID_ID) show_decoded();
-        else go_list();
-    } else { /* V_DECODED */
-        if (btn == BTN_MID_ID) { ble_gatt_disconnect(); go_list(); }
+        /* –/+ гортають вміст; центр — зчитати сервіси; утримання центру — назад */
+        if (btn == BTN_LEFT_ID)  scroll_step(-1);
+        else if (btn == BTN_RIGHT_ID) scroll_step(1);
+        else show_decoded();
+    } else if (s_view == V_DECODED) {
+        if (btn == BTN_LEFT_ID)  scroll_step(-1);
+        else if (btn == BTN_RIGHT_ID) scroll_step(1);
+        else if (ble_gatt_state() == GATT_DONE) show_notif();
+    } else { /* V_NOTIF */
+        if (btn == BTN_LEFT_ID)  scroll_step(-1);
+        else if (btn == BTN_RIGHT_ID) scroll_step(1);
+        /* центр вільний; утримання центру — назад у меню */
     }
 }
 

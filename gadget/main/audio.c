@@ -136,7 +136,8 @@ static void http_task(void *arg)
         goto fail_client;
     }
 
-    uint8_t *buf = malloc(HTTP_CHUNK);
+    uint8_t *buf = heap_caps_malloc(HTTP_CHUNK, MALLOC_CAP_SPIRAM);
+    if (!buf) { s_state = AUDIO_ERROR; goto done_close; }
     while (session == atomic_load(&s_session)) {
         int n = esp_http_client_read(client, (char *)buf, HTTP_CHUNK);
         if (n <= 0) {
@@ -152,10 +153,11 @@ static void http_task(void *arg)
         }
     }
     free(buf);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
     /* помилка лише якщо обрив без коректного завершення файлу */
     if (session == atomic_load(&s_session) && !s_eos) s_state = AUDIO_ERROR;
+done_close:
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
     s_http_running = false;
     vTaskDelete(NULL);
 
@@ -175,11 +177,21 @@ static void decode_task(void *arg)
     s_dec_running = true;
 
     HMP3Decoder dec = MP3InitDecoder();
-    uint8_t *inbuf = malloc(INBUF_SZ);
+    /* великі буфери у PSRAM: економимо дефіцитну внутрішню RAM (лишаються
+       тільки стеки задач). Для 128 кбіт/с пропускної здатності PSRAM удосталь. */
+    uint8_t *inbuf = heap_caps_malloc(INBUF_SZ, MALLOC_CAP_SPIRAM);
     /* 1152 семплів на канал максимум */
-    int16_t *pcm = malloc(1152 * 2 * sizeof(int16_t));
-    int16_t *out = malloc(1152 * 2 * sizeof(int16_t));
+    int16_t *pcm = heap_caps_malloc(1152 * 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    int16_t *out = heap_caps_malloc(1152 * 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     int inlen = 0;
+    if (!dec || !inbuf || !pcm || !out) {
+        ESP_LOGE(TAG, "decode_task: нестача RAM для буферів");
+        if (dec) MP3FreeDecoder(dec);
+        free(inbuf); free(pcm); free(out);
+        s_state = AUDIO_ERROR;
+        s_dec_running = false;
+        vTaskDelete(NULL);
+    }
 
     /* попередня буферизація */
     s_state = AUDIO_BUFFERING;
@@ -200,6 +212,7 @@ static void decode_task(void *arg)
                 if (s_eos && xStreamBufferBytesAvailable(s_sb) == 0) break;
                 if (s_state == AUDIO_PLAYING) {
                     ESP_LOGW(TAG, "буфер порожній, чекаю...");
+                    i2s_on(false);   /* мют на час ре-буферизації — без повтору DMA */
                     s_state = AUDIO_BUFFERING;
                 }
                 continue;
@@ -227,6 +240,7 @@ static void decode_task(void *arg)
             if (fi.samprate > 0) i2s_set_rate(fi.samprate);
             snprintf(s_info, sizeof(s_info), "%d кбіт/с - %d кГц",
                      fi.bitrate / 1000, fi.samprate / 1000);
+            i2s_on(true);            /* перший готовий кадр — знімаємо мют */
             s_state = AUDIO_PLAYING;
 
             /* моно-мікс в обидва I2S-слоти + гучність */
@@ -295,130 +309,36 @@ void audio_play(const char *url)
 {
     audio_stop();
     s_eos = false;
-    i2s_on(true);             /* вмикаємо перед стартом потоку */
+    /* I2S НЕ вмикаємо тут: поки йде зʼєднання/буферизація нема свіжих даних,
+       і ввімкнений підсилювач повторював би старий вміст DMA («зациклювання»).
+       Вмикаємо у decode_task рівно коли готовий перший кадр PCM. */
     strlcpy(s_url, url, sizeof(s_url));
     s_state = AUDIO_CONNECTING;
     int session = atomic_load(&s_session);
-    xTaskCreate(http_task, "radio_http", 6144, (void *)(intptr_t)session, 5,
-                NULL);
-    xTaskCreate(decode_task, "radio_dec", 12288, (void *)(intptr_t)session, 6,
-                NULL);
-}
 
-/* ---------------- Кліп: завантажити -> декодувати весь -> програти ---------------- */
+    size_t freeb = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t big = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "старт: вільно internal %u, найбільший блок %u",
+             (unsigned)freeb, (unsigned)big);
 
-#define CLIP_MP3_MAX (512 * 1024)
-#define CLIP_PCM_MAX (2 * 1024 * 1024)   /* ~20 c стерео 24 кГц */
-
-static void clip_task(void *arg)
-{
-    int session = (int)(intptr_t)arg;
-    s_dec_running = true;
-    s_state = AUDIO_CONNECTING;
-
-    /* 1. завантажуємо весь MP3 у PSRAM */
-    uint8_t *mp3 = heap_caps_malloc(CLIP_MP3_MAX, MALLOC_CAP_SPIRAM);
-    int mp3len = 0;
-    if (mp3) {
-        esp_http_client_config_t cfg = {
-            .url = s_url, .timeout_ms = 15000, .buffer_size = 4096,
-            .buffer_size_tx = 2048, .crt_bundle_attach = esp_crt_bundle_attach,
-            .user_agent = "Mozilla/5.0 (compatible; ESP32)",
-        };
-        esp_http_client_handle_t c = esp_http_client_init(&cfg);
-        if (c && esp_http_client_open(c, 0) == ESP_OK) {
-            esp_http_client_fetch_headers(c);
-            for (int r = 0; r < 3; r++) {
-                int st = esp_http_client_get_status_code(c);
-                if (st < 300 || st >= 400) break;
-                esp_http_client_set_redirection(c);
-                esp_http_client_close(c);
-                if (esp_http_client_open(c, 0) != ESP_OK) break;
-                esp_http_client_fetch_headers(c);
-            }
-            if (esp_http_client_get_status_code(c) == 200) {
-                int n;
-                while (mp3len < CLIP_MP3_MAX &&
-                       (n = esp_http_client_read(c, (char *)mp3 + mp3len,
-                                                 CLIP_MP3_MAX - mp3len)) > 0)
-                    mp3len += n;
-            }
-        }
-        if (c) { esp_http_client_close(c); esp_http_client_cleanup(c); }
+    /* створення задач може не вдатися при нестачі внутрішньої RAM (стеки
+       12+6 КБ): тоді стан завис би на CONNECTING — тому перевіряємо й
+       звітуємо ERROR, а не мовчазне зависання */
+    TaskHandle_t ht = NULL, dt = NULL;
+    if (xTaskCreate(http_task, "radio_http", 4096, (void *)(intptr_t)session, 5,
+                    &ht) != pdPASS) {
+        ESP_LOGE(TAG, "не вдалося створити radio_http (мало RAM)");
+        s_state = AUDIO_ERROR; i2s_on(false);
+        return;
     }
-    if (mp3len == 0 || session != atomic_load(&s_session)) {
-        heap_caps_free(mp3);
-        if (session == atomic_load(&s_session)) s_state = AUDIO_ERROR;
-        s_dec_running = false; vTaskDelete(NULL);
+    if (xTaskCreate(decode_task, "radio_dec", 8192, (void *)(intptr_t)session, 6,
+                    &dt) != pdPASS) {
+        ESP_LOGE(TAG, "не вдалося створити radio_dec (мало RAM)");
+        /* зупиняємо вже створений http_task через зміну сесії */
+        atomic_fetch_add(&s_session, 1);
+        s_state = AUDIO_ERROR; i2s_on(false);
+        return;
     }
-    ESP_LOGI(TAG, "кліп: завантажено %d байт, декодую...", mp3len);
-
-    /* 2. декодуємо весь MP3 у PCM (стерео 16-біт) у PSRAM */
-    s_state = AUDIO_BUFFERING;
-    HMP3Decoder dec = MP3InitDecoder();
-    int16_t *pcm = heap_caps_malloc(CLIP_PCM_MAX, MALLOC_CAP_SPIRAM);
-    int16_t *fr = malloc(1152 * 2 * sizeof(int16_t));
-    int pcmn = 0, rate = 24000;
-    int pcmcap = CLIP_PCM_MAX / 2;   /* у семплах int16 */
-    if (dec && pcm && fr) {
-        uint8_t *rp = mp3; int left = mp3len;
-        while (left > 0 && pcmn + 1152 * 2 < pcmcap) {
-            int off = MP3FindSyncWord(rp, left);
-            if (off < 0) break;
-            rp += off; left -= off;
-            int err = MP3Decode(dec, &rp, &left, fr, 0);
-            if (err == ERR_MP3_NONE) {
-                MP3FrameInfo fi; MP3GetLastFrameInfo(dec, &fi);
-                rate = fi.samprate;
-                int frames = (fi.nChans == 2) ? fi.outputSamps / 2 : fi.outputSamps;
-                int vol = s_volume;
-                for (int i = 0; i < frames; i++) {
-                    int32_t s = (fi.nChans == 2)
-                        ? ((int32_t)fr[2 * i] + fr[2 * i + 1]) / 2 : fr[i];
-                    s = (s * vol) >> 8;
-                    pcm[pcmn++] = (int16_t)s;
-                    pcm[pcmn++] = (int16_t)s;
-                }
-            } else if (err == ERR_MP3_INDATA_UNDERFLOW ||
-                       err == ERR_MP3_MAINDATA_UNDERFLOW) {
-                break;
-            } else { rp++; left--; }
-        }
-    }
-    if (dec) MP3FreeDecoder(dec);
-    free(fr);
-    heap_caps_free(mp3);
-    ESP_LOGI(TAG, "кліп: декодовано %d семплів, %d Гц", pcmn / 2, rate);
-
-    /* 3. рівномірно віддаємо готовий PCM у динамік */
-    if (pcm && pcmn > 0 && session == atomic_load(&s_session)) {
-        i2s_set_rate(rate);
-        i2s_on(true);
-        s_state = AUDIO_PLAYING;
-        int off = 0;
-        while (off < pcmn && session == atomic_load(&s_session)) {
-            size_t wr = 0;
-            int chunk = (pcmn - off > 1024) ? 1024 : (pcmn - off);
-            i2s_channel_write(s_tx, pcm + off, chunk * sizeof(int16_t),
-                              &wr, portMAX_DELAY);
-            off += wr / sizeof(int16_t);
-        }
-        vTaskDelay(pdMS_TO_TICKS(60));  /* дати DMA дограти хвіст */
-    }
-    heap_caps_free(pcm);
-    i2s_on(false);
-    if (session == atomic_load(&s_session)) s_state = AUDIO_STOPPED;
-    s_dec_running = false;
-    vTaskDelete(NULL);
-}
-
-void audio_play_clip(const char *url)
-{
-    audio_stop();
-    s_eos = false;
-    strlcpy(s_url, url, sizeof(s_url));
-    int session = atomic_load(&s_session);
-    xTaskCreate(clip_task, "audio_clip", 6144, (void *)(intptr_t)session, 6, NULL);
 }
 
 audio_state_t audio_state(void) { return s_state; }

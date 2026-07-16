@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "cJSON.h"
 #include "lvgl.h"
@@ -73,7 +74,8 @@ static char *http_get(const char *url, int max)
     if (esp_http_client_open(c, 0) != ESP_OK) goto out;
     esp_http_client_fetch_headers(c);
     if (esp_http_client_get_status_code(c) != 200) goto out;
-    buf = malloc(max + 1);
+    buf = heap_caps_malloc(max + 1, MALLOC_CAP_SPIRAM);  /* транзитний HTTP-буфер у PSRAM */
+    if (!buf) goto out;
     int t = 0, n;
     while (t < max && (n = esp_http_client_read(c, buf + t, max - t)) > 0) t += n;
     buf[t] = 0;

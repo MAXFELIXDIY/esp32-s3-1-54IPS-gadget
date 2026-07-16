@@ -12,6 +12,7 @@ idf_component_register(SRCS "main.c"
                             "app_settings.c"
                             "app_gemini.c"
                             "app_ble.c"
+                            "app_wifitools.c"
                             "app_modules.c"
                             "app_light.c"
                             "fonts/font_ua_16.c"
@@ -23,3 +24,7 @@ idf_component_register(SRCS "main.c"
                                      esp_driver_gpio
                                      esp_driver_ledc esp_driver_spi esp_lcd
                                      esp_driver_i2s esp_timer)
+
+# Дозволяємо перевизначити ieee80211_raw_frame_sanity_check (сильний символ у
+# libnet80211) власною версією у netcfg.c — потрібно для інʼєкції deauth-кадрів.
+target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--allow-multiple-definition")

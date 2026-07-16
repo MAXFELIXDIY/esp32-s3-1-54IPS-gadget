@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "esp_wifi.h"
 #include "esp_log.h"
+#include "esp_attr.h"
 #include "lvgl.h"
 #include "apps.h"
 #include "netcfg.h"
@@ -28,7 +29,7 @@ static const char CHARSET[] =
 typedef enum { V_LIST, V_KEY, V_CONN } view_t;
 static view_t s_view;
 
-static wifi_ap_record_t s_aps[MAX_APS];
+EXT_RAM_BSS_ATTR static wifi_ap_record_t s_aps[MAX_APS];
 static int s_n, s_sel;
 static char s_ssid[33];
 static char s_pass[65];

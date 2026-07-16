@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 
 typedef enum {
     AUDIO_STOPPED,
@@ -10,7 +11,6 @@ typedef enum {
 
 void audio_init(void);
 void audio_play(const char *url);       /* нескінченний потік (радіо) */
-void audio_play_clip(const char *url);  /* скінченний файл: грати після повного завантаження */
 void audio_stop(void);
 
 audio_state_t audio_state(void);
