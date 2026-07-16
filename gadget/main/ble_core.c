@@ -116,6 +116,51 @@ static ble_char_t s_chars[BLE_MAX_CHARS];
 static uint16_t s_char_handle[BLE_MAX_CHARS];
 static int s_n_chars = 0, s_read_idx = 0;
 
+/* кільцевий буфер перехоплених сповіщень */
+static ble_notif_t s_notif[BLE_MAX_NOTIF];
+static volatile uint32_t s_notif_head = 0;   /* всього отримано (монотонно) */
+
+static void notif_store(uint16_t handle, const struct os_mbuf *om)
+{
+    ble_notif_t n = { .handle = handle, .ts = esp_timer_get_time() };
+    for (int i = 0; i < s_n_chars; i++)
+        if (s_char_handle[i] == handle) { n.uuid16 = s_chars[i].uuid16; break; }
+    int len = OS_MBUF_PKTLEN(om);
+    if (len > (int)sizeof(n.val)) len = sizeof(n.val);
+    ble_hs_mbuf_to_flat(om, n.val, len, NULL);
+    n.val_len = len;
+    portENTER_CRITICAL(&s_lock);
+    s_notif[s_notif_head % BLE_MAX_NOTIF] = n;
+    s_notif_head++;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+int ble_gatt_notif_snapshot(ble_notif_t *out, int max)
+{
+    portENTER_CRITICAL(&s_lock);
+    uint32_t total = s_notif_head;
+    int have = total < BLE_MAX_NOTIF ? (int)total : BLE_MAX_NOTIF;
+    if (have > max) have = max;
+    /* найновіші першими */
+    for (int i = 0; i < have; i++)
+        out[i] = s_notif[(total - 1 - i) % BLE_MAX_NOTIF];
+    portEXIT_CRITICAL(&s_lock);
+    return have;
+}
+
+uint32_t ble_gatt_notif_count(void) { return s_notif_head; }
+
+/* Підписка: пишемо 0x0001 у CCCD (val_handle+1) кожної notify/indicate char. */
+void ble_gatt_subscribe_all(void)
+{
+    if (s_gs != GATT_DONE && s_gs != GATT_READING) return;
+    static const uint8_t on[2] = { 0x01, 0x00 };
+    for (int i = 0; i < s_n_chars; i++) {
+        if (s_chars[i].props & (BLE_GATT_CHR_PROP_NOTIFY | BLE_GATT_CHR_PROP_INDICATE))
+            ble_gattc_write_no_rsp_flat(s_conn, s_char_handle[i] + 1, on, sizeof(on));
+    }
+}
+
 static void start_next_read(void);
 
 static int read_cb(uint16_t conn, const struct ble_gatt_error *err,
@@ -153,9 +198,14 @@ static int chr_cb(uint16_t conn, const struct ble_gatt_error *err,
     if (err->status == 0 && chr && s_n_chars < BLE_MAX_CHARS) {
         ble_char_t *c = &s_chars[s_n_chars];
         memset(c, 0, sizeof(*c));
-        if (chr->uuid.u.type == BLE_UUID_TYPE_16)
+        if (chr->uuid.u.type == BLE_UUID_TYPE_16) {
             c->uuid16 = BLE_UUID16(&chr->uuid)->value;
+        } else if (chr->uuid.u.type == BLE_UUID_TYPE_128) {
+            c->is128 = true;
+            memcpy(c->uuid128, BLE_UUID128(&chr->uuid)->value, 16);
+        }
         c->props = chr->properties;
+        c->val_handle = chr->val_handle;
         s_char_handle[s_n_chars] = chr->val_handle;
         s_n_chars++;
     } else if (err->status == BLE_HS_EDONE) {
@@ -184,6 +234,9 @@ static int gatt_cb(struct ble_gap_event *ev, void *arg)
         if (s_gs != GATT_DONE && s_gs != GATT_FAIL) s_gs = GATT_FAIL;
         ble_scan_resume();
         break;
+    case BLE_GAP_EVENT_NOTIFY_RX:
+        notif_store(ev->notify_rx.attr_handle, ev->notify_rx.om);
+        break;
     default: break;
     }
     return 0;
@@ -194,6 +247,7 @@ void ble_gatt_connect(const uint8_t *addr, uint8_t addr_type)
     if (s_scanning) { ble_gap_disc_cancel(); s_scanning = false; }
     s_gs = GATT_CONNECTING;
     s_n_chars = 0;
+    s_notif_head = 0;
     ble_addr_t peer = { .type = addr_type };
     memcpy(peer.val, addr, 6);
     if (ble_gap_connect(s_own_addr_type, &peer, 8000, NULL, gatt_cb, NULL)) {

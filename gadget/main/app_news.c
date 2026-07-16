@@ -12,6 +12,7 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "lvgl.h"
 #include "apps.h"
@@ -28,7 +29,7 @@ typedef enum { V_LIST, V_ART } view_t;
 static view_t s_view;
 
 static char *s_rss;                 /* весь фід у PSRAM */
-static char s_titles[MAX_NEWS][TITLE_LEN];
+EXT_RAM_BSS_ATTR static char s_titles[MAX_NEWS][TITLE_LEN];
 static const char *s_item[MAX_NEWS]; /* вказівник на початок <item> */
 static int s_total;                 /* розібрано новин */
 static int s_shown;                 /* показано у списку */
@@ -190,7 +191,7 @@ static void show_article(void)
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
 
     /* повний текст з <content:encoded> */
-    static char body[BODY_MAX];
+    EXT_RAM_BSS_ATTR static char body[BODY_MAX];
     const char *it = s_item[s_sel];
     const char *ce = strstr(it, "<content:encoded>");
     const char *cd = ce ? strstr(ce, "<![CDATA[") : NULL;

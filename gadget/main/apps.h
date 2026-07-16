@@ -10,6 +10,11 @@ typedef struct {
     void (*open)(lv_obj_t *scr);
     void (*close)(void);
     void (*on_btn)(int btn);
+    /* необовʼязково: утримання бокової кнопки (–/+). Якщо задано, для цього
+       застосунку бокові кнопки спрацьовують по відпусканню (короткий тап),
+       а утримання ~700 мс віддає окрему подію сюди. NULL = стара поведінка
+       (клік по фронту + автоповтор). */
+    void (*on_hold)(int btn);
 } app_t;
 
 extern const app_t app_wifi;
@@ -19,6 +24,7 @@ extern const app_t app_news;
 extern const app_t app_settings;
 extern const app_t app_gemini;
 extern const app_t app_ble;
+extern const app_t app_wifitools;
 extern const app_t app_modules;
 extern const app_t app_light;
 

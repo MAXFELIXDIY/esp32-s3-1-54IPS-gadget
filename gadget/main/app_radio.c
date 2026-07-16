@@ -13,13 +13,24 @@
 
 typedef struct { const char *name, *url; } station_t;
 static const station_t ST[] = {
+    /* --- українські (TAVR Media). HTTP, а не HTTPS: ці стріми віддають аудіо
+       напряму по http, а TLS-рукостискання на ESP32 вішало «Зʼєднання...» --- */
+    { "Хіт FM",              "http://online.hitfm.ua/HitFM" },
+    { "Радіо ROKS",          "http://online.radioroks.ua/RadioROKS" },
+    { "ROKS Укр. рок",       "http://online.radioroks.ua/RadioROKS_Ukr" },
+    { "Наше Радіо",          "http://online.nasheradio.ua/NasheRadio" },
+    { "Kiss FM",             "http://online.kissfm.ua/KissFM" },
+    { "Kiss FM Deep",        "http://online.kissfm.ua/KissFM_Deep" },
+    { "Радіо Relax",         "http://online.radiorelax.ua/RadioRelax" },
+    { "Мелодія FM",          "http://online.melodiafm.ua/MelodiaFM" },
+    { "Radio Jazz",          "http://online.radiojazz.ua/RadioJazz" },
+    /* --- міжнародні --- */
     { "SomaFM Groove Salad", "http://ice1.somafm.com/groovesalad-128-mp3" },
     { "SomaFM Secret Agent", "http://ice1.somafm.com/secretagent-128-mp3" },
     { "Radio Paradise",      "http://stream.radioparadise.com/mp3-128" },
-    { "Хіт FM",              "https://online.hitfm.ua/HitFM" },
-    { "Радіо ROKS",          "https://online.radioroks.ua/RadioROKS" },
 };
 #define N_ST (int)(sizeof(ST) / sizeof(ST[0]))
+#define VOL_STEP 13     /* крок гучності ≈5% від діапазону 0..256 */
 
 /* панель: 0 ◄станція 1 гучн− 2 play/stop 3 гучн+ 4 станція► */
 #define N_CTRL 5
@@ -178,10 +189,10 @@ static void radio_btn(int btn)
         if (audio_state() != AUDIO_STOPPED) play_current();
         break;
     case 1: /* тихіше */
-        settings_set_volume(settings_volume() - 24); render_vol();
+        settings_set_volume(settings_volume() - VOL_STEP); render_vol();
         break;
     case 3: /* гучніше */
-        settings_set_volume(settings_volume() + 24); render_vol();
+        settings_set_volume(settings_volume() + VOL_STEP); render_vol();
         break;
     case 2: { /* play / stop */
         audio_state_t a = audio_state();

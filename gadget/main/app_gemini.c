@@ -17,13 +17,13 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "cJSON.h"
 #include "lvgl.h"
 #include "apps.h"
 #include "netcfg.h"
-#include "audio.h"
 #include "led.h"
 #include "groq_key.h"        /* ключ Groq (gsk_...) */
 
@@ -41,12 +41,26 @@ static const char *TAG = "groq";
 #define STT_MODEL  "whisper-large-v3-turbo"
 #define CHAT_MODEL "llama-3.3-70b-versatile"
 #define SYS_PROMPT "Ти дружній голосовий помічник. Відповідай стисло й " \
-    "зрозуміло українською, звичайним текстом без розмітки, 2-4 речення."
+    "зрозуміло українською, звичайним текстом без розмітки, 2-4 речення. " \
+    "Твої відповіді показуються на маленькому екрані 240x240 і озвучуються " \
+    "голосом. Уникай списків, markdown, довгих цифрових послідовностей."
 
 typedef enum { G_RECORD, G_STT, G_CHAT, G_ANSWER, G_ERR } gstate_t;
 static volatile gstate_t s_state;
-static char s_question[400];
-static char s_answer[3000];
+EXT_RAM_BSS_ATTR static char s_question[400];
+EXT_RAM_BSS_ATTR static char s_answer[3000];
+
+/* історія розмови: кільцевий буфер на 3 пари (user+assistant) для контексту.
+   У PSRAM, щоб не забирати дефіцитну внутрішню RAM (потрібна аудіо/Wi-Fi). */
+#define HIST_PAIRS 3
+#define HIST_U 400
+#define HIST_A 400
+EXT_RAM_BSS_ATTR static char s_hist_u[HIST_PAIRS][HIST_U];
+EXT_RAM_BSS_ATTR static char s_hist_a[HIST_PAIRS][HIST_A];
+static int  s_hist_n;               /* скільки пар збережено (0..HIST_PAIRS) */
+
+static volatile bool s_busy;        /* work_task жива — захист від подвійного запуску */
+static volatile bool s_app_open;    /* застосунок відкритий (для скасування work_task) */
 
 static lv_obj_t *s_scr, *s_root, *s_hint;
 static lv_timer_t *s_timer;
@@ -66,19 +80,32 @@ static uint8_t *record_wav(size_t *out_len)
                       .dout = I2S_GPIO_UNUSED, .din = MIC_DIN },
     };
     sc.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
-    i2s_channel_init_std_mode(rx, &sc);
-    i2s_channel_enable(rx);
+    /* Перевіряємо init/enable: якщо I2S_NUM_1 зайнятий (радіо) — не зависаємо. */
+    if (i2s_channel_init_std_mode(rx, &sc) != ESP_OK) {
+        ESP_LOGE(TAG, "i2s init_std_mode fail");
+        i2s_del_channel(rx); return NULL;
+    }
+    if (i2s_channel_enable(rx) != ESP_OK) {
+        ESP_LOGE(TAG, "i2s enable fail");
+        i2s_del_channel(rx); return NULL;
+    }
 
     size_t pcm_bytes = N_SAMP * 2, total = 44 + pcm_bytes;
     uint8_t *wav = heap_caps_malloc(total, MALLOC_CAP_SPIRAM);
     int32_t *blk = malloc(1024 * sizeof(int32_t));
-    if (!wav || !blk) { free(blk); free(wav); i2s_del_channel(rx); return NULL; }
+    if (!wav || !blk) {
+        free(blk); free(wav);
+        i2s_channel_disable(rx); i2s_del_channel(rx); return NULL;
+    }
 
     int16_t *pcm = (int16_t *)(wav + 44);
     int got = 0;
     while (got < N_SAMP) {
         size_t br = 0;
-        i2s_channel_read(rx, blk, 1024 * sizeof(int32_t), &br, portMAX_DELAY);
+        /* таймаут замість portMAX_DELAY: при збої драйвера виходимо, не зависаємо */
+        if (i2s_channel_read(rx, blk, 1024 * sizeof(int32_t), &br,
+                             pdMS_TO_TICKS(1000)) != ESP_OK)
+            break;
         int n = br / sizeof(int32_t);
         for (int i = 0; i < n && got < N_SAMP; i++) {
             int32_t v = blk[i] >> 12;
@@ -89,6 +116,11 @@ static uint8_t *record_wav(size_t *out_len)
     free(blk);
     i2s_channel_disable(rx);
     i2s_del_channel(rx);
+
+    if (got == 0) { free(wav); return NULL; }   /* нічого не записано */
+    /* якщо запис обірвався таймаутом — зменшуємо WAV до фактично зчитаного */
+    pcm_bytes = (size_t)got * 2;
+    total = 44 + pcm_bytes;
 
     uint32_t brate = SR * 2, dsz = pcm_bytes, rsz = 36 + dsz, sr = SR, f16 = 16;
     uint16_t pcm1 = 1, ch1 = 1, ba = 2, bps = 16;
@@ -191,16 +223,31 @@ static bool groq_transcribe(uint8_t *wav, size_t wl, char *out, int outsz)
 }
 
 /* Llama: текст запиту -> відповідь */
+#define CHAT_BODY 8192
+
 static bool groq_chat(const char *q, char *out, int outsz)
 {
-    char eq[600];
-    json_escape(q, eq, sizeof(eq));
-    char *body = heap_caps_malloc(1200, MALLOC_CAP_SPIRAM);
-    if (!body) return false;
-    int bl = snprintf(body, 1200,
+    char *body = heap_caps_malloc(CHAT_BODY, MALLOC_CAP_SPIRAM);
+    char *esc  = heap_caps_malloc(2 * HIST_A + 8, MALLOC_CAP_SPIRAM);
+    if (!body || !esc) { free(body); free(esc); return false; }
+
+    int bl = snprintf(body, CHAT_BODY,
         "{\"model\":\"" CHAT_MODEL "\",\"messages\":["
-        "{\"role\":\"system\",\"content\":\"" SYS_PROMPT "\"},"
-        "{\"role\":\"user\",\"content\":\"%s\"}],\"max_tokens\":600}", eq);
+        "{\"role\":\"system\",\"content\":\"" SYS_PROMPT "\"}");
+    /* попередні пари для контексту розмови */
+    for (int i = 0; i < s_hist_n; i++) {
+        json_escape(s_hist_u[i], esc, 2 * HIST_A + 8);
+        bl += snprintf(body + bl, CHAT_BODY - bl,
+                       ",{\"role\":\"user\",\"content\":\"%s\"}", esc);
+        json_escape(s_hist_a[i], esc, 2 * HIST_A + 8);
+        bl += snprintf(body + bl, CHAT_BODY - bl,
+                       ",{\"role\":\"assistant\",\"content\":\"%s\"}", esc);
+    }
+    /* поточне питання */
+    json_escape(q, esc, 2 * HIST_A + 8);
+    bl += snprintf(body + bl, CHAT_BODY - bl,
+                   ",{\"role\":\"user\",\"content\":\"%s\"}],\"max_tokens\":600}", esc);
+    free(esc);
 
     esp_http_client_config_t cfg = {
         .url = CHAT_URL, .method = HTTP_METHOD_POST, .timeout_ms = 30000,
@@ -244,62 +291,58 @@ static bool groq_chat(const char *q, char *out, int outsz)
 
 /* ---------------- фонова задача ---------------- */
 
+/* Виставити стан після повного запису s_answer/s_question. Барʼєр release
+   гарантує, що на іншому ядрі (LVGL-потік читає у gem_poll) буфер уже
+   записаний до того, як стане видимим новий s_state. */
+static void set_state(gstate_t st)
+{
+    __sync_synchronize();
+    s_state = st;
+}
+
+/* Додати пару (питання, відповідь) в історію (кільцевий буфер на HIST_PAIRS). */
+static void hist_push(const char *u, const char *a)
+{
+    if (s_hist_n < HIST_PAIRS) {
+        strlcpy(s_hist_u[s_hist_n], u, HIST_U);
+        strlcpy(s_hist_a[s_hist_n], a, HIST_A);
+        s_hist_n++;
+    } else {
+        for (int i = 1; i < HIST_PAIRS; i++) {
+            memcpy(s_hist_u[i - 1], s_hist_u[i], HIST_U);
+            memcpy(s_hist_a[i - 1], s_hist_a[i], HIST_A);
+        }
+        strlcpy(s_hist_u[HIST_PAIRS - 1], u, HIST_U);
+        strlcpy(s_hist_a[HIST_PAIRS - 1], a, HIST_A);
+    }
+}
+
 static void work_task(void *arg)
 {
     size_t wl = 0;
     uint8_t *wav = record_wav(&wl);
-    if (!wav) { strcpy(s_answer, "Помилка мікрофона"); s_state = G_ERR; vTaskDelete(NULL); }
+    if (!wav) {
+        strcpy(s_answer, "Помилка мікрофона");
+        set_state(G_ERR); s_busy = false; vTaskDelete(NULL);
+    }
+    /* застосунок закрили під час запису — не витрачаємо мережу далі */
+    if (!s_app_open) { heap_caps_free(wav); s_busy = false; vTaskDelete(NULL); }
 
-    s_state = G_STT;
+    set_state(G_STT);
     bool ok = groq_transcribe(wav, wl, s_question, sizeof(s_question));
     heap_caps_free(wav);
+    if (!s_app_open) { s_busy = false; vTaskDelete(NULL); }
     if (!ok || !s_question[0]) {
         strcpy(s_answer, "Не вдалося розпізнати мовлення. Спробуйте ще.");
-        s_state = G_ERR; vTaskDelete(NULL);
+        set_state(G_ERR); s_busy = false; vTaskDelete(NULL);
     }
 
-    s_state = G_CHAT;
+    set_state(G_CHAT);
     ok = groq_chat(s_question, s_answer, sizeof(s_answer));
-    s_state = ok ? G_ANSWER : G_ERR;
+    if (ok) hist_push(s_question, s_answer);   /* контекст для наступних питань */
+    set_state(ok ? G_ANSWER : G_ERR);
+    s_busy = false;
     vTaskDelete(NULL);
-}
-
-/* ---------------- TTS ---------------- */
-
-static int utf8_len(unsigned char c)
-{
-    if (c < 0x80) return 1;
-    if ((c >> 5) == 0x6) return 2;
-    if ((c >> 4) == 0xE) return 3;
-    if ((c >> 3) == 0x1E) return 4;
-    return 1;
-}
-
-static void speak(void)
-{
-    static char url[760];
-    int p = snprintf(url, sizeof(url),
-        "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=uk&q=");
-    const char *s = s_answer;
-    int cnt = 0;
-    /* кодуємо ПОцілими UTF-8 символами (ніколи не ріжемо кирилицю навпіл) */
-    while (*s && cnt < 120) {
-        int cl = utf8_len((unsigned char)s[0]);
-        for (int k = 0; k < cl; k++) if (!s[k]) { cl = k; break; }
-        if (cl == 0) break;
-        if (p + cl * 3 + 8 >= (int)sizeof(url)) break;   /* лишаємо запас */
-        for (int k = 0; k < cl; k++) {
-            unsigned char ch = (unsigned char)s[k];
-            if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
-                (ch >= '0' && ch <= '9')) url[p++] = ch;
-            else p += snprintf(url + p, sizeof(url) - p, "%%%02X", ch);
-        }
-        s += cl;
-        cnt++;
-    }
-    url[p] = 0;
-    ESP_LOGI(TAG, "TTS URL (%d): %s", p, url);
-    audio_play_clip(url);   /* повне завантаження перед відтворенням */
 }
 
 /* ---------------- UI ---------------- */
@@ -332,7 +375,7 @@ static void show_answer(void)
     lv_obj_set_style_text_color(t, lv_color_hex(0xE8ECF0), 0);
 
     lv_obj_scroll_to_y(s_root, 0, LV_ANIM_OFF);
-    lv_label_set_text(s_hint, "центр — озвучити   2x — новий запит");
+    lv_label_set_text(s_hint, "–/+ гортати • утримання + — новий запит");
 }
 
 static void gem_poll(lv_timer_t *tm)
@@ -360,18 +403,23 @@ static void gem_poll(lv_timer_t *tm)
 
 static void start_record(void)
 {
+    if (s_busy) return;                 /* попередня задача ще працює */
     if (!netcfg_is_connected()) {
         s_state = G_ERR;
         strcpy(s_answer, "Немає Wi-Fi.\nПідключіться в Налаштуваннях");
         return;
     }
+    s_busy = true;
     s_state = G_RECORD;
-    xTaskCreate(work_task, "groq", 8192, NULL, 4, NULL);
+    if (xTaskCreate(work_task, "groq", 8192, NULL, 4, NULL) != pdPASS)
+        s_busy = false;                 /* не створилась — знімаємо прапорець */
 }
 
 static void gem_open(lv_obj_t *scr)
 {
     s_scr = scr;
+    s_app_open = true;
+    s_hist_n = 0;               /* нова сесія — чистимо контекст розмови */
     lv_obj_t *title = lv_label_create(scr);
     lv_label_set_text(title, "Асистент");
     lv_obj_set_style_text_font(title, &font_ua_20, 0);
@@ -398,34 +446,31 @@ static void gem_open(lv_obj_t *scr)
 
 static void gem_close(void)
 {
+    s_app_open = false;   /* work_task зупиниться між етапами */
     if (s_timer) { lv_timer_delete(s_timer); s_timer = NULL; }
-    audio_stop();
     led_off();
 }
 
 static void gem_btn(int btn)
 {
-    static int64_t last_mid;
     if (s_state == G_ANSWER) {
-        if (btn == BTN_MID_ID) {
-            int64_t now = esp_timer_get_time();
-            if (now - last_mid < 500000) {   /* подвійний клік — новий запит */
-                last_mid = 0;
-                audio_stop();
-                start_record();
-            } else {                          /* одиночний — озвучити */
-                last_mid = now;
-                speak();
-            }
-        } else {
+        /* –/+ — прокрутка тексту (утримання + = новий запит, див. gem_hold);
+           центр вільний */
+        if (btn == BTN_LEFT_ID || btn == BTN_RIGHT_ID)
             lv_obj_scroll_by(s_root, 0, btn == BTN_RIGHT_ID ? -60 : 60, LV_ANIM_ON);
-        }
     } else if (s_state == G_ERR) {
         if (btn == BTN_MID_ID) start_record();
     }
 }
 
+/* утримання бокової кнопки: + (права) — новий запит */
+static void gem_hold(int btn)
+{
+    if (btn == BTN_RIGHT_ID && (s_state == G_ANSWER || s_state == G_ERR))
+        start_record();
+}
+
 const app_t app_gemini = {
     .name = "Асистент (Groq)",
-    .open = gem_open, .close = gem_close, .on_btn = gem_btn,
+    .open = gem_open, .close = gem_close, .on_btn = gem_btn, .on_hold = gem_hold,
 };

@@ -35,7 +35,10 @@ typedef enum {
 } gatt_state_t;
 
 typedef struct {
-    uint16_t uuid16;           /* 0 = 128-бітний */
+    uint16_t uuid16;           /* 0 = 128-бітний (тоді дивись uuid128/is128) */
+    bool     is128;
+    uint8_t  uuid128[16];      /* повний UUID (little-endian, як у NimBLE) */
+    uint16_t val_handle;
     uint8_t  props;
     uint8_t  val[40];
     uint8_t  val_len;
@@ -50,3 +53,20 @@ int          ble_gatt_chars(ble_char_t *out, int max);
 /* Розшифровка відомої характеристики; true якщо UUID відомий. */
 bool ble_decode_char(const ble_char_t *c, char *name, int nn,
                      char *value, int nv);
+
+/* ---- Перехоплення сповіщень (notify/indicate) ---- */
+#define BLE_MAX_NOTIF 24
+typedef struct {
+    uint16_t handle;           /* handle характеристики-джерела */
+    uint16_t uuid16;           /* UUID (16-біт) якщо відомий, інакше 0 */
+    uint8_t  val[40];
+    uint8_t  val_len;
+    int64_t  ts;               /* час (мкс) */
+} ble_notif_t;
+
+/* Підписатися на всі notify/indicate характеристики поточного з'єднання. */
+void ble_gatt_subscribe_all(void);
+/* Знімок перехоплених сповіщень (найновіші першими). Повертає кількість. */
+int  ble_gatt_notif_snapshot(ble_notif_t *out, int max);
+/* Скільки сповіщень перехоплено всього (лічильник, для індикації "живого" потоку). */
+uint32_t ble_gatt_notif_count(void);

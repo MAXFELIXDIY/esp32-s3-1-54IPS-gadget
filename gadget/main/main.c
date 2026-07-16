@@ -116,8 +116,8 @@ static screen_t s_screen = SCR_HOME;
 static const app_t *s_app = NULL;
 
 static const app_t *const APPS[] = { &app_gemini, &app_weather, &app_radio,
-                                     &app_news, &app_ble, &app_modules,
-                                     &app_light, &app_settings };
+                                     &app_news, &app_ble, &app_wifitools,
+                                     &app_modules, &app_light, &app_settings };
 #define GEMINI_IDX 0
 #define N_APPS (int)(sizeof(APPS) / sizeof(APPS[0]))
 static int s_menu_sel = 0;
@@ -127,6 +127,10 @@ static int s_menu_sel = 0;
 static lv_obj_t *s_eye_l, *s_eye_r, *s_mouth;
 static lv_obj_t *s_clock_lbl;
 static lv_timer_t *s_face_timer, *s_clock_timer, *s_drift_timer;
+
+/* стан «сну» (під час притлумлення підсвітки на головному екрані) */
+static lv_obj_t *s_bub[3];
+static bool s_sleeping;
 
 static void clock_tick(lv_timer_t *t)
 {
@@ -260,19 +264,89 @@ static void show_home(void)
     s_face_timer = lv_timer_create(face_tick, 1400, NULL);
     s_clock_timer = lv_timer_create(clock_tick, 5000, NULL);
     s_drift_timer = lv_timer_create(drift_tick, 6000, NULL);
+
+    s_sleeping = false;
+    for (int i = 0; i < 3; i++) s_bub[i] = NULL;
+}
+
+/* ---- анімація сну (очі заплющені + бульбашки, що піднімаються й тануть) ---- */
+static void e_bub_y(void *v, int32_t y)  { lv_obj_set_y((lv_obj_t *)v, y); }
+static void e_bub_op(void *v, int32_t o) { lv_obj_set_style_bg_opa((lv_obj_t *)v, o, 0); }
+
+static void face_bubbles_stop(void)
+{
+    for (int i = 0; i < 3; i++)
+        if (s_bub[i]) { lv_anim_delete(s_bub[i], NULL); lv_obj_delete(s_bub[i]); s_bub[i] = NULL; }
+}
+
+/* заснути: спокійне заплющене обличчя + бульбашки (виклик при притлумленні) */
+static void face_sleep(void)
+{
+    if (s_screen != SCR_HOME || s_sleeping) return;
+    s_sleeping = true;
+    if (s_face_timer) lv_timer_pause(s_face_timer);
+    if (s_drift_timer) lv_timer_pause(s_drift_timer);
+    lv_anim_delete_all();                 /* зупинити випадкові анімації обличчя */
+    g_bl = g_br = 1.0f; g_lx = g_ly = g_ox = g_oy = 0;   /* очі заплющені, погляд рівний */
+    g_mw = 44; g_mh = 8;                  /* маленький спокійний рот */
+    face_render();
+
+    lv_obj_t *scr = lv_screen_active();
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *b = lv_obj_create(scr);
+        int d = 7 + i * 3;
+        lv_obj_set_size(b, d, d);
+        lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0x5A6672), 0);
+        lv_obj_set_style_border_width(b, 0, 0);
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(b, 150 + i * 11, 88);
+        s_bub[i] = b;
+        /* нескінченний повтор зі зсувом фази для кожної бульбашки */
+        lv_anim_t ay; lv_anim_init(&ay); lv_anim_set_var(&ay, b);
+        lv_anim_set_exec_cb(&ay, e_bub_y); lv_anim_set_values(&ay, 92, 44);
+        lv_anim_set_duration(&ay, 2600); lv_anim_set_delay(&ay, i * 850);
+        lv_anim_set_repeat_count(&ay, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_path_cb(&ay, lv_anim_path_ease_in_out); lv_anim_start(&ay);
+        lv_anim_t ao; lv_anim_init(&ao); lv_anim_set_var(&ao, b);
+        lv_anim_set_exec_cb(&ao, e_bub_op); lv_anim_set_values(&ao, 200, 0);
+        lv_anim_set_duration(&ao, 2600); lv_anim_set_delay(&ao, i * 850);
+        lv_anim_set_repeat_count(&ao, LV_ANIM_REPEAT_INFINITE); lv_anim_start(&ao);
+    }
+}
+
+/* прокинутись: очі розплющені, бульбашки прибрані, анімації відновлені */
+static void face_wake(void)
+{
+    if (!s_sleeping) return;
+    s_sleeping = false;
+    face_bubbles_stop();
+    g_bl = g_br = 0; g_mw = 70; g_mh = 16;
+    face_render();
+    if (s_face_timer) lv_timer_resume(s_face_timer);
+    if (s_drift_timer) lv_timer_resume(s_drift_timer);
+}
+
+/* екран вимикається: прибрати бульбашки, щоб не гнати рендери в темряву */
+static void face_off(void)
+{
+    face_bubbles_stop();      /* очі лишаються заплющені статично — жодних анімацій */
 }
 
 static void home_leave(void)
 {
+    face_bubbles_stop();       /* прибрати бульбашки до очищення екрана (без dangling) */
+    s_sleeping = false;
     if (s_face_timer) { lv_timer_delete(s_face_timer); s_face_timer = NULL; }
     if (s_clock_timer) { lv_timer_delete(s_clock_timer); s_clock_timer = NULL; }
     if (s_drift_timer) { lv_timer_delete(s_drift_timer); s_drift_timer = NULL; }
     lv_anim_delete_all();
 }
 
-/* ---------------- меню ---------------- */
+/* ---------------- меню (карусель великих іконок) ---------------- */
 
-static lv_obj_t *s_menu_items[N_APPS], *s_menu_list, *s_menu_wifi, *s_menu_bat;
+#define CARD_W 240
+static lv_obj_t *s_track, *s_menu_wifi, *s_menu_bat, *s_menu_clock;
 static lv_timer_t *s_menu_timer;
 
 static void menu_wifi_tick(lv_timer_t *t)
@@ -280,8 +354,12 @@ static void menu_wifi_tick(lv_timer_t *t)
     if (s_menu_wifi)
         lv_obj_set_style_text_color(s_menu_wifi,
             lv_color_hex(netcfg_is_connected() ? 0xFFFFFF : 0x3A4550), 0);
-
-    /* батарея (ADC2 читаємо не щотіку — рідше, бо ділиться з Wi-Fi) */
+    if (s_menu_clock) {
+        char clk[8];
+        netcfg_get_clock(clk, sizeof(clk));
+        lv_label_set_text(s_menu_clock, clk);
+    }
+    /* батарея (ADC2 читаємо рідше, бо ділиться з Wi-Fi) */
     static int cnt = 0;
     if (s_menu_bat && (cnt++ % 4) == 0) {
         battery_sample();
@@ -301,70 +379,175 @@ static void menu_leave(void)
     if (s_menu_timer) { lv_timer_delete(s_menu_timer); s_menu_timer = NULL; }
 }
 
-static void menu_highlight(void)
+/* --- примітиви іконок --- */
+#define IC_ACC 0x35C4F0
+#define IC_CL  0xC7CED6
+#define IC_YE  0xFFD43B
+#define IC_GY  0x8A94A0
+static void idot(lv_obj_t *p, int d, uint32_t c, int x, int y)
 {
-    for (int i = 0; i < N_APPS; i++)
-        lv_obj_set_style_bg_color(s_menu_items[i],
-            lv_color_hex(i == s_menu_sel ? 0x2563EB : 0x1A222C), 0);
-    lv_obj_scroll_to_view(s_menu_items[s_menu_sel], LV_ANIM_ON);
+    lv_obj_t *o = lv_obj_create(p);
+    lv_obj_set_size(o, d, d); lv_obj_set_pos(o, x, y);
+    lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(o, lv_color_hex(c), 0);
+    lv_obj_set_style_border_width(o, 0, 0);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(o, LV_SCROLLBAR_MODE_OFF);
+}
+static void irect(lv_obj_t *p, int w, int h, int r, uint32_t c, int x, int y)
+{
+    lv_obj_t *o = lv_obj_create(p);
+    lv_obj_set_size(o, w, h); lv_obj_set_pos(o, x, y);
+    lv_obj_set_style_radius(o, r, 0);
+    lv_obj_set_style_bg_color(o, lv_color_hex(c), 0);
+    lv_obj_set_style_border_width(o, 0, 0);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(o, LV_SCROLLBAR_MODE_OFF);
+}
+
+/* контейнер 64x64 з іконкою застосунку за індексом */
+static lv_obj_t *make_app_icon(lv_obj_t *parent, int idx)
+{
+    lv_obj_t *ic = lv_obj_create(parent);
+    lv_obj_set_size(ic, 64, 64);
+    lv_obj_set_style_bg_opa(ic, LV_OPA_0, 0);
+    lv_obj_set_style_border_width(ic, 0, 0);
+    lv_obj_set_style_pad_all(ic, 0, 0);
+    lv_obj_clear_flag(ic, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(ic, LV_SCROLLBAR_MODE_OFF);
+    switch (idx) {
+    case 0: /* Асистент — мікрофон */
+        irect(ic, 18, 28, 9, IC_ACC, 23, 8);
+        irect(ic, 26, 4, 2, IC_ACC, 19, 40);
+        irect(ic, 4, 10, 2, IC_ACC, 30, 40);
+        irect(ic, 20, 4, 2, IC_ACC, 22, 50);
+        break;
+    case 1: /* Погода — сонце + хмара */
+        idot(ic, 20, IC_YE, 8, 8);
+        idot(ic, 15, IC_CL, 18, 28); idot(ic, 20, IC_CL, 28, 22);
+        idot(ic, 15, IC_CL, 40, 28); irect(ic, 38, 11, 5, IC_CL, 18, 33);
+        break;
+    case 2: /* Радіо — нота */
+        idot(ic, 15, IC_ACC, 16, 40);
+        irect(ic, 4, 32, 2, IC_ACC, 29, 12);
+        irect(ic, 11, 5, 2, IC_ACC, 31, 12);
+        break;
+    case 3: /* Новини — газета */
+        irect(ic, 44, 42, 4, IC_CL, 10, 11);
+        irect(ic, 30, 7, 1, IC_ACC, 17, 17);
+        irect(ic, 30, 3, 1, IC_GY, 17, 30);
+        irect(ic, 30, 3, 1, IC_GY, 17, 37);
+        irect(ic, 20, 3, 1, IC_GY, 17, 44);
+        break;
+    case 4: /* BLE — сигнальні смуги */
+        irect(ic, 7, 10, 2, IC_ACC, 15, 38);
+        irect(ic, 7, 18, 2, IC_ACC, 27, 30);
+        irect(ic, 7, 26, 2, IC_ACC, 39, 22);
+        break;
+    case 5: /* Wi-Fi атака — радіохвилі */
+        idot(ic, 8, IC_ACC, 28, 44);
+        irect(ic, 18, 5, 2, IC_ACC, 23, 33);
+        irect(ic, 30, 5, 2, IC_ACC, 17, 23);
+        irect(ic, 42, 5, 2, IC_ACC, 11, 13);
+        break;
+    case 6: /* Модулі — чіп */
+        irect(ic, 34, 34, 4, IC_ACC, 15, 15);
+        irect(ic, 14, 14, 2, 0x0B0F14, 25, 25);
+        irect(ic, 4, 4, 0, IC_ACC, 9, 22); irect(ic, 4, 4, 0, IC_ACC, 9, 38);
+        irect(ic, 4, 4, 0, IC_ACC, 51, 22); irect(ic, 4, 4, 0, IC_ACC, 51, 38);
+        break;
+    case 7: /* Нічник — лампа */
+        idot(ic, 26, IC_YE, 19, 6);
+        irect(ic, 14, 8, 2, IC_GY, 25, 32);
+        irect(ic, 10, 4, 1, IC_GY, 27, 40);
+        break;
+    default: /* Налаштування — повзунки */
+        for (int k = 0; k < 3; k++) {
+            irect(ic, 40, 4, 2, IC_GY, 12, 16 + k * 13);
+            idot(ic, 10, IC_ACC, k == 0 ? 16 : k == 1 ? 38 : 27, 13 + k * 13);
+        }
+        break;
+    }
+    return ic;
+}
+
+/* --- анімація свайпу --- */
+static void track_exec(void *v, int32_t x) { lv_obj_set_x(s_track, x); }
+
+static void menu_slide(void)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_track);
+    lv_anim_set_exec_cb(&a, track_exec);
+    lv_anim_set_values(&a, lv_obj_get_x(s_track), -s_menu_sel * CARD_W);
+    lv_anim_set_duration(&a, 260);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
 }
 
 static void show_menu(void)
 {
     s_screen = SCR_MENU;
-    netcfg_wifi_resume();        /* виходимо зі сну — вмикаємо Wi-Fi */
+    netcfg_wifi_resume();
     lv_obj_t *scr = lv_screen_active();
     lv_obj_clean(scr);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x0B0F14), 0);
     lv_obj_set_style_text_font(scr, &font_ua_16, 0);
 
-    lv_obj_t *title = lv_label_create(scr);
-    lv_label_set_text(title, "Меню");
-    lv_obj_set_style_text_font(title, &font_ua_20, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
+    /* хедер: годинник по центру, Wi-Fi зліва, батарея справа */
+    s_menu_clock = lv_label_create(scr);
+    lv_label_set_text(s_menu_clock, "--:--");
+    lv_obj_set_style_text_font(s_menu_clock, &font_ua_20, 0);
+    lv_obj_set_style_text_color(s_menu_clock, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(s_menu_clock, LV_ALIGN_TOP_MID, 0, 8);
 
-    /* значок Wi-Fi у лівому верхньому куті: сірий = немає, білий = підключено */
     s_menu_wifi = lv_label_create(scr);
     lv_label_set_text(s_menu_wifi, LV_SYMBOL_WIFI);
-    /* символ WIFI є лише у вбудованому шрифті LVGL, не в нашому кириличному */
     lv_obj_set_style_text_font(s_menu_wifi, &lv_font_montserrat_14, 0);
-    lv_obj_align(s_menu_wifi, LV_ALIGN_TOP_LEFT, 6, 10);
+    lv_obj_align(s_menu_wifi, LV_ALIGN_TOP_LEFT, 6, 12);
 
-    /* заряд батареї у правому верхньому куті */
     s_menu_bat = lv_label_create(scr);
     lv_label_set_text(s_menu_bat, "--%");
     lv_obj_set_style_text_color(s_menu_bat, lv_color_hex(0x5A6672), 0);
-    lv_obj_align(s_menu_bat, LV_ALIGN_TOP_RIGHT, -6, 10);
+    lv_obj_align(s_menu_bat, LV_ALIGN_TOP_RIGHT, -6, 12);
 
     menu_wifi_tick(NULL);
     s_menu_timer = lv_timer_create(menu_wifi_tick, 1000, NULL);
 
-    s_menu_list = lv_obj_create(scr);
-    lv_obj_set_size(s_menu_list, 228, 180);
-    lv_obj_align(s_menu_list, LV_ALIGN_TOP_MID, 0, 44);
-    lv_obj_set_style_bg_opa(s_menu_list, LV_OPA_0, 0);
-    lv_obj_set_style_border_width(s_menu_list, 0, 0);
-    lv_obj_set_flex_flow(s_menu_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(s_menu_list, 8, 0);
-    lv_obj_set_scrollbar_mode(s_menu_list, LV_SCROLLBAR_MODE_OFF);
+    /* доріжка карусельних карток */
+    s_track = lv_obj_create(scr);
+    lv_obj_set_size(s_track, CARD_W * N_APPS, 190);
+    lv_obj_set_pos(s_track, -s_menu_sel * CARD_W, 40);
+    lv_obj_set_style_bg_opa(s_track, LV_OPA_0, 0);
+    lv_obj_set_style_border_width(s_track, 0, 0);
+    lv_obj_set_style_pad_all(s_track, 0, 0);
+    lv_obj_clear_flag(s_track, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_track, LV_SCROLLBAR_MODE_OFF);
 
     for (int i = 0; i < N_APPS; i++) {
-        lv_obj_t *btn = lv_obj_create(s_menu_list);
-        lv_obj_set_size(btn, 200, 46);
-        lv_obj_set_style_radius(btn, 10, 0);
-        lv_obj_set_style_border_width(btn, 0, 0);
-        lv_obj_set_scrollbar_mode(btn, LV_SCROLLBAR_MODE_OFF);
-        lv_obj_t *l = lv_label_create(btn);
+        lv_obj_t *card = lv_obj_create(s_track);
+        lv_obj_set_size(card, CARD_W, 190);
+        lv_obj_set_pos(card, i * CARD_W, 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_0, 0);
+        lv_obj_set_style_border_width(card, 0, 0);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_OFF);
+
+        lv_obj_t *ic = make_app_icon(card, i);
+        lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 24);
+
+        lv_obj_t *l = lv_label_create(card);
         lv_label_set_text(l, APPS[i]->name);
+        lv_obj_set_style_text_font(l, &font_ua_20, 0);
         lv_obj_set_style_text_color(l, lv_color_hex(0xE8ECF0), 0);
-        lv_obj_center(l);
-        s_menu_items[i] = btn;
+        lv_obj_set_width(l, 200);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 104);
     }
-    menu_highlight();
 
     lv_obj_t *hint = lv_label_create(scr);
-    lv_label_set_text(hint, "утримуйте центр — назад");
+    lv_label_set_text(hint, "<  центр — відкрити  >");   /* наш кириличний шрифт */
     lv_obj_set_style_text_color(hint, lv_color_hex(0x3A4550), 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -6);
 }
@@ -389,21 +572,65 @@ static void close_app(void)
 
 /* ---------------- кнопки ---------------- */
 
+/* ---- автозгасання підсвітки на простої ---- */
+#define BL_DIM_US 15000000LL   /* 15 с бездіяльності → притлумити */
+#define BL_OFF_US 60000000LL   /* 60 с → погасити екран */
+static int64_t s_last_act;     /* час останнього натискання */
+static uint8_t s_bl_state;     /* 0=повна, 1=тьмяна, 2=вимкнена */
+static bool s_bl_swallow;      /* «ковтнути» клік, що розбудив з вимкненого екрана */
+
+/* натискання будь-якої кнопки: скинути таймер простою й відновити яскравість */
+static void bl_wake(void)
+{
+    s_last_act = esp_timer_get_time();
+    if (s_bl_state != 0) {
+        if (s_bl_state == 2) s_bl_swallow = true;  /* пробудження з OFF — цей клік не діє */
+        ui_backlight_set(settings_brightness());
+        s_bl_state = 0;
+        face_wake();                                /* робот прокидається */
+    }
+}
+
 static void buttons_poll_cb(lv_timer_t *t)
 {
     static bool was[3];
     static int64_t down_at[3], last_rep[3];
     static bool mid_long;
+    static bool side_long[3];   /* утримання бокової кнопки вже оброблене */
+    /* антидребезг: приймаємо зміну рівня лише коли він стабільний ≥2 полінги
+       (~50 мс при періоді 25 мс) — інакше механічний брязкіт дає хибні кліки */
+    static bool deb[3], rawprev[3];
+    static uint8_t stab[3];
     const int pins[3] = { BTN_LEFT, BTN_MID, BTN_RIGHT };
     int64_t now = esp_timer_get_time();
 
+    /* керування яскравістю за простоєм */
+    if (s_last_act == 0) s_last_act = now;
+    int64_t idle = now - s_last_act;
+    if (s_bl_state == 0 && idle > BL_DIM_US) {
+        int d = settings_brightness() / 4; if (d < 8) d = 8;
+        ui_backlight_set(d); s_bl_state = 1;         /* притлумити */
+        if (s_screen == SCR_HOME) face_sleep();      /* робот засинає */
+    } else if (s_bl_state == 1 && idle > BL_OFF_US) {
+        ui_backlight_set(0); s_bl_state = 2;         /* погасити */
+        if (s_screen == SCR_HOME) face_off();
+    }
+
+    bool all_released = true;
     for (int i = 0; i < 3; i++) {
-        bool pressed = !gpio_get_level(pins[i]);
+        bool raw = !gpio_get_level(pins[i]);
+        if (raw) all_released = false;
+        if (raw != rawprev[i]) { rawprev[i] = raw; stab[i] = 0; }
+        else if (stab[i] < 255) stab[i]++;
+        if (stab[i] >= 2) deb[i] = raw;   /* стабільний рівень — фіксуємо */
+        bool pressed = deb[i];
         bool clicked = false;
 
         if (pressed && !was[i]) {
             down_at[i] = now;
             if (i == BTN_MID_ID) mid_long = false;
+            else side_long[i] = false;
+            bl_wake();          /* натискання будить екран і скидає простій */
         }
         if (i == BTN_MID_ID) {
             /* на головному екрані утримання 5 с = виклик Gemini */
@@ -424,6 +651,16 @@ static void buttons_poll_cb(lv_timer_t *t)
                 continue;
             }
             if (!pressed && was[i] && !mid_long) clicked = true;
+        } else if (s_screen == SCR_APP && s_app && s_app->on_hold) {
+            /* застосунок хоче окрему подію утримання бокової кнопки:
+               короткий тап — по відпусканню; утримання ~700 мс — on_hold */
+            if (pressed && !side_long[i] && now - down_at[i] > 700000) {
+                side_long[i] = true;
+                s_app->on_hold(i);
+                was[i] = pressed;
+                continue;
+            }
+            if (!pressed && was[i] && !side_long[i]) clicked = true;
         } else {
             if (pressed && !was[i]) clicked = true;
             if (pressed && now - down_at[i] > 400000 &&
@@ -431,6 +668,7 @@ static void buttons_poll_cb(lv_timer_t *t)
         }
         was[i] = pressed;
         if (!clicked) continue;
+        if (s_bl_swallow) continue;   /* клік лише розбудив екран — не діємо */
 
         switch (s_screen) {
         case SCR_HOME:
@@ -438,16 +676,16 @@ static void buttons_poll_cb(lv_timer_t *t)
             show_menu();
             break;
         case SCR_MENU:
-            if (i == BTN_LEFT_ID) s_menu_sel = (s_menu_sel + N_APPS - 1) % N_APPS;
-            else if (i == BTN_RIGHT_ID) s_menu_sel = (s_menu_sel + 1) % N_APPS;
-            else { menu_leave(); open_app(s_menu_sel); continue; }
-            menu_highlight();
+            if (i == BTN_LEFT_ID) { if (s_menu_sel > 0) s_menu_sel--; menu_slide(); }
+            else if (i == BTN_RIGHT_ID) { if (s_menu_sel < N_APPS - 1) s_menu_sel++; menu_slide(); }
+            else { menu_leave(); open_app(s_menu_sel); }
             break;
         case SCR_APP:
             if (s_app && s_app->on_btn) s_app->on_btn(i);
             break;
         }
     }
+    if (all_released) s_bl_swallow = false;   /* відпустили — знімаємо «ковтання» */
 }
 
 /* ---------------- main ---------------- */
