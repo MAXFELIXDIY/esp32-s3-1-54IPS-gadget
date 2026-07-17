@@ -119,10 +119,31 @@ static const app_t *const APPS[] = { &app_gemini, &app_weather, &app_radio,
                                      &app_news, &app_calendar, &app_calc,
                                      &app_ble, &app_wifitools, &app_modules,
                                      &app_light, &app_pet, &app_pipboy,
-                                     &app_settings };
+                                     &app_sdprobe, &app_settings };
 #define GEMINI_IDX 0
 #define N_APPS (int)(sizeof(APPS) / sizeof(APPS[0]))
 static int s_menu_sel = 0;
+
+/* видимі в меню застосунки (після фільтра кастомізації) */
+static int s_vis[N_APPS], s_nvis;
+
+/* асистент і налаштування завжди присутні; решту можна ховати */
+bool menu_app_locked(int i) { return i == GEMINI_IDX || i == N_APPS - 1; }
+int  menu_app_count(void) { return N_APPS; }
+const char *menu_app_name(int i)
+{
+    return (i >= 0 && i < N_APPS) ? APPS[i]->name : "";
+}
+
+/* перерахувати список видимих застосунків із налаштувань */
+static void menu_build_vis(void)
+{
+    s_nvis = 0;
+    for (int i = 0; i < N_APPS; i++)
+        if (menu_app_locked(i) || settings_menu_visible(i))
+            s_vis[s_nvis++] = i;
+    if (s_menu_sel >= s_nvis) s_menu_sel = s_nvis ? s_nvis - 1 : 0;
+}
 
 /* ---------------- головний екран: очі + рот ---------------- */
 
@@ -492,6 +513,13 @@ static lv_obj_t *make_app_icon(lv_obj_t *parent, int idx)
             for (int by = 0; by < 2; by++)
                 idot(ic, 6, IC_ACC, 17 + bx * 10, 30 + by * 10);  /* кнопки */
         break;
+    case 12: /* SD-зонд — картка памʼяті зі зрізаним кутом */
+        irect(ic, 34, 44, 4, IC_ACC, 15, 12);
+        irect(ic, 10, 10, 0, 0x0B0F14, 39, 12);    /* зрізаний кут */
+        irect(ic, 4, 12, 1, IC_GY, 20, 16);        /* контакти */
+        irect(ic, 4, 12, 1, IC_GY, 27, 16);
+        irect(ic, 4, 12, 1, IC_GY, 34, 16);
+        break;
     default: /* Налаштування — повзунки */
         for (int k = 0; k < 3; k++) {
             irect(ic, 40, 4, 2, IC_GY, 12, 16 + k * 13);
@@ -546,9 +574,11 @@ static void show_menu(void)
     menu_wifi_tick(NULL);
     s_menu_timer = lv_timer_create(menu_wifi_tick, 1000, NULL);
 
+    menu_build_vis();               /* застосувати кастомізацію меню */
+
     /* доріжка карусельних карток */
     s_track = lv_obj_create(scr);
-    lv_obj_set_size(s_track, CARD_W * N_APPS, 190);
+    lv_obj_set_size(s_track, CARD_W * s_nvis, 190);
     lv_obj_set_pos(s_track, -s_menu_sel * CARD_W, 40);
     lv_obj_set_style_bg_opa(s_track, LV_OPA_0, 0);
     lv_obj_set_style_border_width(s_track, 0, 0);
@@ -556,10 +586,11 @@ static void show_menu(void)
     lv_obj_clear_flag(s_track, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(s_track, LV_SCROLLBAR_MODE_OFF);
 
-    for (int i = 0; i < N_APPS; i++) {
+    for (int k = 0; k < s_nvis; k++) {
+        int i = s_vis[k];
         lv_obj_t *card = lv_obj_create(s_track);
         lv_obj_set_size(card, CARD_W, 190);
-        lv_obj_set_pos(card, i * CARD_W, 0);
+        lv_obj_set_pos(card, k * CARD_W, 0);
         lv_obj_set_style_bg_opa(card, LV_OPA_0, 0);
         lv_obj_set_style_border_width(card, 0, 0);
         lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
@@ -714,8 +745,8 @@ static void buttons_poll_cb(lv_timer_t *t)
             break;
         case SCR_MENU:
             if (i == BTN_LEFT_ID) { if (s_menu_sel > 0) s_menu_sel--; menu_slide(); }
-            else if (i == BTN_RIGHT_ID) { if (s_menu_sel < N_APPS - 1) s_menu_sel++; menu_slide(); }
-            else { menu_leave(); open_app(s_menu_sel); }
+            else if (i == BTN_RIGHT_ID) { if (s_menu_sel < s_nvis - 1) s_menu_sel++; menu_slide(); }
+            else { int idx = s_vis[s_menu_sel]; menu_leave(); open_app(idx); }
             break;
         case SCR_APP:
             if (s_app && s_app->on_btn) s_app->on_btn(i);

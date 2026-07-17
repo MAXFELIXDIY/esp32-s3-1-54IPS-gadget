@@ -28,7 +28,8 @@ idf_component_register(SRCS "main.c"
                                      esp-tls json bt esp_adc esp_driver_i2c
                                      esp_driver_gpio
                                      esp_driver_ledc esp_driver_spi esp_lcd
-                                     esp_driver_i2s esp_timer)
+                                     esp_driver_i2s esp_timer
+                                     spi_flash app_update)
 
 # Дозволяємо перевизначити ieee80211_raw_frame_sanity_check (сильний символ у
 # libnet80211) власною версією у netcfg.c — потрібно для інʼєкції deauth-кадрів.
