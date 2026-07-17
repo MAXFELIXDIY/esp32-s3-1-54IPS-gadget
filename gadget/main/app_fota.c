@@ -308,10 +308,12 @@ static void render_info(void)
         lv_obj_set_style_text_color(txt, lv_color_hex(0xC7CED6), 0);
         lv_obj_set_style_text_font(txt, &font_ua_16, 0);
     } else {
-        /* статусний рядок */
+        /* статусний рядок (перенос, щоб довгий текст не обрізався) */
         lv_obj_t *st = lv_label_create(col);
+        lv_obj_set_width(st, 222);
+        lv_label_set_long_mode(st, LV_LABEL_LONG_WRAP);
         if (netcfg_is_connected() && s_chk == 2) {
-            lv_label_set_text(st, "Встановлена актуальна версія");
+            lv_label_set_text(st, "Версія актуальна");
             lv_obj_set_style_text_color(st, lv_color_hex(0x8A94A0), 0);
         } else if (s_chk == 3 && netcfg_is_connected()) {
             lv_label_set_text(st, "Центр — повторити перевірку");
