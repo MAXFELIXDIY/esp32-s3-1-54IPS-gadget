@@ -41,6 +41,7 @@ static char s_err[64];
 /* стан перевірки версії: 0 idle, 1 перевірка, 2 готово, 3 помилка */
 static volatile int s_chk;
 static char s_latest[24];            /* актуальна версія без 'v' */
+static char s_notes[320];            /* опис змін (release body) */
 static bool s_focus;                 /* фокус на кнопці «Оновити» */
 
 static lv_obj_t *s_root;
@@ -96,10 +97,14 @@ static void check_task(void *arg)
     free(body);
     if (!j) { s_chk = 3; vTaskDelete(NULL); }
     cJSON *tag = cJSON_GetObjectItem(j, "tag_name");
+    cJSON *notes_j = cJSON_GetObjectItem(j, "body");
     if (cJSON_IsString(tag) && tag->valuestring) {
         const char *t = tag->valuestring;
         if (*t == 'v' || *t == 'V') t++;
         strlcpy(s_latest, t, sizeof(s_latest));
+        s_notes[0] = 0;
+        if (cJSON_IsString(notes_j) && notes_j->valuestring)
+            strlcpy(s_notes, notes_j->valuestring, sizeof(s_notes));
         s_chk = 2;
     } else {
         s_chk = 3;
@@ -212,6 +217,7 @@ static void add_row(lv_obj_t *parent, const char *label, const char *value,
 static void render_info(void)
 {
     lv_obj_clean(s_root);
+    lv_obj_set_layout(s_root, LV_LAYOUT_NONE);   /* ручна розкладка через align */
 
     lv_obj_t *hdr = lv_label_create(s_root);
     lv_label_set_text(hdr, "Оновлення прошивки");
@@ -220,8 +226,8 @@ static void render_info(void)
 
     /* колонка з інформацією */
     lv_obj_t *col = lv_obj_create(s_root);
-    lv_obj_set_size(col, 228, 150);
-    lv_obj_align(col, LV_ALIGN_TOP_MID, 0, 24);
+    lv_obj_set_size(col, 228, 156);
+    lv_obj_align(col, LV_ALIGN_TOP_MID, 0, 22);
     lv_obj_set_style_bg_opa(col, LV_OPA_0, 0);
     lv_obj_set_style_border_width(col, 0, 0);
     lv_obj_set_style_pad_all(col, 0, 0);
@@ -241,19 +247,42 @@ static void render_info(void)
     else                             { lat = "—";             latc = 0x8A94A0; }
     add_row(col, "Актуальна", lat, latc);
 
-    /* статусний рядок */
-    lv_obj_t *st = lv_label_create(col);
-    if (update_available()) {
-        lv_label_set_text(st, "Доступне оновлення");
-        lv_obj_set_style_text_color(st, lv_color_hex(0x4ADE80), 0);
-    } else if (netcfg_is_connected() && s_chk == 2) {
-        lv_label_set_text(st, "Встановлена актуальна версія");
-        lv_obj_set_style_text_color(st, lv_color_hex(0x8A94A0), 0);
-    } else if (s_chk == 3 && netcfg_is_connected()) {
-        lv_label_set_text(st, "Центр — повторити перевірку");
-        lv_obj_set_style_text_color(st, lv_color_hex(0x3A4550), 0);
+    if (update_available() && s_notes[0]) {
+        /* вікно «Що нового» з описом змін релізу */
+        char title[48];
+        snprintf(title, sizeof(title), "Що нового у %s", s_latest);
+        lv_obj_t *nt = lv_label_create(col);
+        lv_label_set_text(nt, title);
+        lv_obj_set_style_text_color(nt, lv_color_hex(0x4ADE80), 0);
+
+        lv_obj_t *box = lv_obj_create(col);
+        lv_obj_set_size(box, 222, 80);
+        lv_obj_set_style_bg_color(box, lv_color_hex(0x0E141B), 0);
+        lv_obj_set_style_radius(box, 6, 0);
+        lv_obj_set_style_border_width(box, 1, 0);
+        lv_obj_set_style_border_color(box, lv_color_hex(0x1E2A38), 0);
+        lv_obj_set_style_pad_all(box, 6, 0);
+        lv_obj_set_scrollbar_mode(box, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *txt = lv_label_create(box);
+        lv_obj_set_width(txt, 206);
+        lv_label_set_long_mode(txt, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(txt, s_notes);
+        lv_obj_set_style_text_color(txt, lv_color_hex(0xC7CED6), 0);
+        lv_obj_set_style_text_font(txt, &font_ua_16, 0);
     } else {
-        lv_label_set_text(st, "");
+        /* статусний рядок */
+        lv_obj_t *st = lv_label_create(col);
+        if (netcfg_is_connected() && s_chk == 2) {
+            lv_label_set_text(st, "Встановлена актуальна версія");
+            lv_obj_set_style_text_color(st, lv_color_hex(0x8A94A0), 0);
+        } else if (s_chk == 3 && netcfg_is_connected()) {
+            lv_label_set_text(st, "Центр — повторити перевірку");
+            lv_obj_set_style_text_color(st, lv_color_hex(0x3A4550), 0);
+        } else {
+            lv_label_set_text(st, "");
+        }
     }
 
     /* кнопка «Оновити» внизу — три стани */
@@ -350,10 +379,12 @@ static void render_result(bool ok)
     }
 }
 
-/* повне скидання flex-стилів кореня (progress/result їх задають) */
+/* Вимкнути лейаут кореня: progress/result вмикають flex, а екран інформації
+   розкладає елементи вручну через lv_obj_align. Якщо лишити flex увімкненим,
+   він ігнорує align і шикує все в ряд/колонку (елементи «тікають» за екран). */
 static void root_reset_layout(void)
 {
-    lv_obj_set_flex_flow(s_root, LV_FLEX_FLOW_ROW);   /* нейтрально; info сам розкладає */
+    lv_obj_set_layout(s_root, LV_LAYOUT_NONE);
     lv_obj_set_style_pad_row(s_root, 0, 0);
 }
 
