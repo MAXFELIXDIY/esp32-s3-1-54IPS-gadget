@@ -11,6 +11,7 @@
 
 static uint8_t s_bright = 200;
 static int s_vol = 200;
+static uint32_t s_menumask = 0xFFFFFFFF;   /* усі застосунки видимі за замовч. */
 
 static void save_u8(const char *k, uint8_t v)
 {
@@ -32,6 +33,7 @@ void settings_init(void)
         nvs_get_u8(h, "bright", &s_bright);
         int32_t v = s_vol;
         if (nvs_get_i32(h, "vol", &v) == ESP_OK) s_vol = v;
+        nvs_get_u32(h, "menumask", &s_menumask);
         nvs_close(h);
     }
     if (s_bright < BR_MIN) s_bright = BR_MIN;
@@ -59,4 +61,17 @@ void settings_set_volume(int v)
     s_vol = v;
     audio_set_volume(s_vol);
     save_i32("vol", s_vol);
+}
+
+bool settings_menu_visible(int i)
+{
+    return (s_menumask >> i) & 1u;
+}
+
+void settings_menu_toggle(int i)
+{
+    s_menumask ^= (1u << i);
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u32(h, "menumask", s_menumask); nvs_commit(h); nvs_close(h);
 }

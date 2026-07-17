@@ -36,6 +36,11 @@ extern const app_t app_light;
 /* керування підсвіткою (реалізовано в main.c) */
 void ui_backlight_set(uint8_t duty);
 
+/* доступ до списку застосунків для кастомізації меню (реалізовано в main.c) */
+int         menu_app_count(void);
+const char *menu_app_name(int i);
+bool        menu_app_locked(int i);   /* асистент і налаштування — завжди у меню */
+
 LV_FONT_DECLARE(font_ua_16);
 LV_FONT_DECLARE(font_ua_20);
 LV_FONT_DECLARE(font_num_34);
