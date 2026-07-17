@@ -41,8 +41,12 @@ static char s_err[64];
 /* стан перевірки версії: 0 idle, 1 перевірка, 2 готово, 3 помилка */
 static volatile int s_chk;
 static char s_latest[24];            /* актуальна версія без 'v' */
-static char s_notes[320];            /* опис змін (release body) */
-static bool s_focus;                 /* фокус на кнопці «Оновити» */
+static char s_notes[512];            /* опис змін (release body) */
+
+/* екран: 0 — інформація, 1 — повноекранний опис релізу */
+static int s_view;
+/* вибір на екрані інформації: 0 — вікно нотаток, 1 — кнопка «Оновити» */
+static int s_sel;
 
 static lv_obj_t *s_root;
 static lv_timer_t *s_timer;
@@ -58,6 +62,27 @@ static bool update_available(void)
 {
     return netcfg_is_connected() && s_chk == 2 && s_latest[0] &&
            strcmp(cur_ver(), s_latest) != 0;
+}
+
+/* вікно нотаток можна вибрати лише коли є оновлення й непорожній опис */
+static bool notes_selectable(void)
+{
+    return update_available() && s_notes[0];
+}
+
+/* Прибрати з тексту символи, яких немає в шрифті (даються порожніми
+   прямокутниками): CR та інші контрольні, крім переводу рядка. */
+static void sanitize(char *s)
+{
+    char *w = s;
+    for (char *r = s; *r; r++) {
+        unsigned char c = (unsigned char)*r;
+        if (c == '\r') continue;                 /* CRLF -> LF */
+        if (c == '\t') { *w++ = ' '; continue; } /* табуляція -> пробіл */
+        if (c < 0x20) continue;                  /* інші контрольні */
+        *w++ = *r;
+    }
+    *w = 0;
 }
 
 /* ---------------- перевірка версії ---------------- */
@@ -103,8 +128,11 @@ static void check_task(void *arg)
         if (*t == 'v' || *t == 'V') t++;
         strlcpy(s_latest, t, sizeof(s_latest));
         s_notes[0] = 0;
-        if (cJSON_IsString(notes_j) && notes_j->valuestring)
+        if (cJSON_IsString(notes_j) && notes_j->valuestring) {
             strlcpy(s_notes, notes_j->valuestring, sizeof(s_notes));
+            sanitize(s_notes);
+        }
+        s_sel = 0;               /* першим вибирається вікно нотаток */
         s_chk = 2;
     } else {
         s_chk = 3;
@@ -247,8 +275,11 @@ static void render_info(void)
     else                             { lat = "—";             latc = 0x8A94A0; }
     add_row(col, "Актуальна", lat, latc);
 
-    if (update_available() && s_notes[0]) {
-        /* вікно «Що нового» з описом змін релізу */
+    bool en = update_available();
+    if (!en || !s_notes[0]) s_sel = 1;   /* без нотаток вибирається лише кнопка */
+
+    if (en && s_notes[0]) {
+        /* вибиране вікно «Що нового» (s_sel == 0) */
         char title[48];
         snprintf(title, sizeof(title), "Що нового у %s", s_latest);
         lv_obj_t *nt = lv_label_create(col);
@@ -256,14 +287,19 @@ static void render_info(void)
         lv_obj_set_style_text_color(nt, lv_color_hex(0x4ADE80), 0);
 
         lv_obj_t *box = lv_obj_create(col);
-        lv_obj_set_size(box, 222, 80);
+        lv_obj_set_size(box, 222, 78);
         lv_obj_set_style_bg_color(box, lv_color_hex(0x0E141B), 0);
         lv_obj_set_style_radius(box, 6, 0);
-        lv_obj_set_style_border_width(box, 1, 0);
-        lv_obj_set_style_border_color(box, lv_color_hex(0x1E2A38), 0);
         lv_obj_set_style_pad_all(box, 6, 0);
         lv_obj_set_scrollbar_mode(box, LV_SCROLLBAR_MODE_OFF);
         lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+        if (s_sel == 0) {                        /* вибрано */
+            lv_obj_set_style_border_width(box, 2, 0);
+            lv_obj_set_style_border_color(box, lv_color_hex(0x35C4F0), 0);
+        } else {
+            lv_obj_set_style_border_width(box, 1, 0);
+            lv_obj_set_style_border_color(box, lv_color_hex(0x1E2A38), 0);
+        }
 
         lv_obj_t *txt = lv_label_create(box);
         lv_obj_set_width(txt, 206);
@@ -285,8 +321,8 @@ static void render_info(void)
         }
     }
 
-    /* кнопка «Оновити» внизу — три стани */
-    bool en = update_available();
+    /* кнопка «Оновити» внизу — вибиране (s_sel == 1) */
+    bool bsel = en && s_sel == 1;
     lv_obj_t *btn = lv_obj_create(s_root);
     lv_obj_set_size(btn, 220, 40);
     lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, 0);
@@ -302,13 +338,13 @@ static void render_info(void)
         lv_obj_set_style_border_width(btn, 0, 0);
         lv_label_set_text(bl, s_chk == 1 ? "Перевірка..." : "Оновити");
         lv_obj_set_style_text_color(bl, lv_color_hex(0x5A6672), 0);
-    } else if (s_focus) {                        /* активна + у фокусі */
+    } else if (bsel) {                           /* активна + вибрана */
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x35C4F0), 0);
         lv_obj_set_style_border_width(btn, 2, 0);
         lv_obj_set_style_border_color(btn, lv_color_hex(0xFFFFFF), 0);
-        lv_label_set_text(bl, "Оновити ▶");
+        lv_label_set_text(bl, "Оновити");
         lv_obj_set_style_text_color(bl, lv_color_hex(0x08131C), 0);
-    } else {                                     /* активна, без фокуса */
+    } else {                                     /* активна, не вибрана */
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x1E2A38), 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_border_color(btn, lv_color_hex(0x35C4F0), 0);
@@ -316,12 +352,60 @@ static void render_info(void)
         lv_obj_set_style_text_color(bl, lv_color_hex(0xE8ECF0), 0);
     }
 
-    /* підказка навігації для активної кнопки */
+    /* підказка навігації */
     lv_obj_t *hint = lv_label_create(s_root);
-    lv_label_set_text(hint, en ? (s_focus ? "Центр — почати" : "+ — навести фокус")
-                                : "");
+    const char *h = "";
+    if (en && s_notes[0]) {
+        h = (s_sel == 0) ? "Центр — опис,  + до кнопки"
+                         : "Центр — оновити,  - до опису";
+    } else if (en) {
+        h = "Центр — оновити";
+    } else if (s_chk == 3 && netcfg_is_connected()) {
+        h = "Центр — повторити";
+    }
+    lv_label_set_text(hint, h);
     lv_obj_set_style_text_color(hint, lv_color_hex(0x3A4550), 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -44);
+}
+
+/* повноекранний опис релізу з прокруткою (+/- гортають, центр — назад) */
+static lv_obj_t *s_notes_scroll;
+
+static void render_notes(void)
+{
+    lv_obj_clean(s_root);
+    lv_obj_set_layout(s_root, LV_LAYOUT_NONE);
+
+    char title[48];
+    snprintf(title, sizeof(title), "Що нового у %s", s_latest);
+    lv_obj_t *hdr = lv_label_create(s_root);
+    lv_label_set_text(hdr, title);
+    lv_obj_set_style_text_color(hdr, lv_color_hex(0x4ADE80), 0);
+    lv_obj_align(hdr, LV_ALIGN_TOP_MID, 0, 0);
+
+    /* прокручуваний контейнер */
+    lv_obj_t *sc = lv_obj_create(s_root);
+    lv_obj_set_size(sc, 228, 178);
+    lv_obj_align(sc, LV_ALIGN_TOP_MID, 0, 22);
+    lv_obj_set_style_bg_color(sc, lv_color_hex(0x0E141B), 0);
+    lv_obj_set_style_radius(sc, 6, 0);
+    lv_obj_set_style_border_width(sc, 0, 0);
+    lv_obj_set_style_pad_all(sc, 8, 0);
+    lv_obj_set_scroll_dir(sc, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(sc, LV_SCROLLBAR_MODE_ON);
+    s_notes_scroll = sc;
+
+    lv_obj_t *txt = lv_label_create(sc);
+    lv_obj_set_width(txt, 208);
+    lv_label_set_long_mode(txt, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(txt, s_notes[0] ? s_notes : "—");
+    lv_obj_set_style_text_color(txt, lv_color_hex(0xE8ECF0), 0);
+    lv_obj_set_style_text_font(txt, &font_ua_16, 0);
+
+    lv_obj_t *hint = lv_label_create(s_root);
+    lv_label_set_text(hint, "+/- гортати,  центр — назад");
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x3A4550), 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, 0);
 }
 
 static void render_progress(void)
@@ -391,6 +475,7 @@ static void root_reset_layout(void)
 static void app_poll(lv_timer_t *t)
 {
     static int last = -2, lastp = -1, lastc = -1;
+    if (s_view == 1) { last = s_state; lastc = s_chk; return; }  /* опис — статичний */
     if (s_state == 1) {
         if (last != 1 || lastp != s_progress) { render_progress(); lastp = s_progress; }
     } else if (s_state == 2) {
@@ -411,7 +496,10 @@ static void fota_open(lv_obj_t *scr)
     s_err[0] = 0;
     s_chk = 0;
     s_latest[0] = 0;
-    s_focus = false;
+    s_notes[0] = 0;
+    s_view = 0;
+    s_sel = 0;
+    s_notes_scroll = NULL;
     s_root = lv_obj_create(scr);
     lv_obj_set_size(s_root, 236, 236);
     lv_obj_center(s_root);
@@ -435,20 +523,30 @@ static void fota_btn(int btn)
     if (s_state == 1 || s_state == 2) return;    /* під час оновлення ігноруємо */
 
     if (s_state == 3) {                          /* екран помилки — назад в інфо */
-        if (btn == BTN_MID_ID) { s_state = 0; s_focus = false; render_info(); }
+        if (btn == BTN_MID_ID) { s_state = 0; render_info(); }
         return;
     }
 
-    /* екран інформації */
-    if (btn == BTN_RIGHT_ID) {                   /* «+» — навести фокус */
-        if (update_available() && !s_focus) { s_focus = true; render_info(); }
-    } else if (btn == BTN_LEFT_ID) {             /* «−» — зняти фокус */
-        if (s_focus) { s_focus = false; render_info(); }
+    if (s_view == 1) {                           /* повноекранний опис релізу */
+        if (btn == BTN_RIGHT_ID && s_notes_scroll)
+            lv_obj_scroll_by(s_notes_scroll, 0, -48, LV_ANIM_ON);   /* + вниз */
+        else if (btn == BTN_LEFT_ID && s_notes_scroll)
+            lv_obj_scroll_by(s_notes_scroll, 0, 48, LV_ANIM_ON);    /* - вгору */
+        else if (btn == BTN_MID_ID) { s_view = 0; render_info(); } /* назад */
+        return;
+    }
+
+    /* екран інформації: +/- перемикають вибір між вікном нотаток і кнопкою */
+    if (btn == BTN_RIGHT_ID) {                   /* «+» — до кнопки */
+        if (update_available() && s_notes[0] && s_sel == 0) { s_sel = 1; render_info(); }
+    } else if (btn == BTN_LEFT_ID) {             /* «−» — до вікна нотаток */
+        if (s_sel == 1) { s_sel = 0; render_info(); }
     } else if (btn == BTN_MID_ID) {
-        if (update_available() && s_focus) {
-            start_ota();                         /* фокус на активній кнопці — старт */
+        if (update_available()) {
+            if (s_sel == 0 && s_notes[0]) { s_view = 1; render_notes(); }  /* опис */
+            else start_ota();                    /* кнопка — старт */
         } else if (s_chk != 1) {
-            start_check();                       /* інакше — повторити перевірку */
+            start_check();                       /* немає оновлення — перевірити ще */
         }
     }
 }
