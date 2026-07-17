@@ -371,6 +371,8 @@ static void home_leave(void)
 
 #define CARD_W 240
 static lv_obj_t *s_track, *s_menu_wifi, *s_menu_bat, *s_menu_clock;
+static lv_obj_t *s_icons[N_APPS];   /* іконки карток за видимим індексом */
+static int s_anim_k = -1;           /* яка іконка зараз пульсує (-1 = жодна) */
 static lv_timer_t *s_menu_timer;
 
 static void menu_wifi_tick(lv_timer_t *t)
@@ -544,6 +546,34 @@ static lv_obj_t *make_app_icon(lv_obj_t *parent, int idx)
 /* --- анімація свайпу --- */
 static void track_exec(void *v, int32_t x) { lv_obj_set_x(s_track, x); }
 
+/* --- пульсація вибраної іконки --- */
+static void icon_scale_exec(void *v, int32_t s)
+{
+    lv_obj_set_style_transform_scale((lv_obj_t *)v, s, 0);
+}
+
+/* Зупинити пульс на попередній іконці й запустити на картці k. */
+static void menu_anim_select(int k)
+{
+    if (s_anim_k >= 0 && s_anim_k < s_nvis && s_icons[s_anim_k]) {
+        lv_anim_delete(s_icons[s_anim_k], icon_scale_exec);
+        lv_obj_set_style_transform_scale(s_icons[s_anim_k], 256, 0);  /* 100% */
+    }
+    s_anim_k = k;
+    if (k < 0 || k >= s_nvis || !s_icons[k]) return;
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_icons[k]);
+    lv_anim_set_exec_cb(&a, icon_scale_exec);
+    lv_anim_set_values(&a, 256, 300);           /* 100% -> ~117% і назад */
+    lv_anim_set_duration(&a, 650);
+    lv_anim_set_playback_duration(&a, 650);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_start(&a);
+}
+
 static void menu_slide(void)
 {
     lv_anim_t a;
@@ -586,6 +616,7 @@ static void show_menu(void)
     s_menu_timer = lv_timer_create(menu_wifi_tick, 1000, NULL);
 
     menu_build_vis();               /* застосувати кастомізацію меню */
+    s_anim_k = -1;                  /* екран очищено — старих анімацій немає */
 
     /* доріжка карусельних карток */
     s_track = lv_obj_create(scr);
@@ -609,6 +640,9 @@ static void show_menu(void)
 
         lv_obj_t *ic = make_app_icon(card, i);
         lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 24);
+        lv_obj_set_style_transform_pivot_x(ic, 32, 0);   /* масштаб від центру */
+        lv_obj_set_style_transform_pivot_y(ic, 32, 0);
+        s_icons[k] = ic;
 
         lv_obj_t *l = lv_label_create(card);
         lv_label_set_text(l, APPS[i]->name);
@@ -623,6 +657,8 @@ static void show_menu(void)
     lv_label_set_text(hint, "<  центр — відкрити  >");   /* наш кириличний шрифт */
     lv_obj_set_style_text_color(hint, lv_color_hex(0x3A4550), 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -6);
+
+    menu_anim_select(s_menu_sel);   /* пульс на поточній іконці */
 }
 
 /* ---------------- перемикання ---------------- */
@@ -755,8 +791,8 @@ static void buttons_poll_cb(lv_timer_t *t)
             show_menu();
             break;
         case SCR_MENU:
-            if (i == BTN_LEFT_ID) { if (s_menu_sel > 0) s_menu_sel--; menu_slide(); }
-            else if (i == BTN_RIGHT_ID) { if (s_menu_sel < s_nvis - 1) s_menu_sel++; menu_slide(); }
+            if (i == BTN_LEFT_ID) { if (s_menu_sel > 0) s_menu_sel--; menu_slide(); menu_anim_select(s_menu_sel); }
+            else if (i == BTN_RIGHT_ID) { if (s_menu_sel < s_nvis - 1) s_menu_sel++; menu_slide(); menu_anim_select(s_menu_sel); }
             else { int idx = s_vis[s_menu_sel]; menu_leave(); open_app(idx); }
             break;
         case SCR_APP:
