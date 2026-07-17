@@ -173,14 +173,15 @@ static float g_bl, g_br;      /* кліпання лівого/правого о
 static float g_lx, g_ly;      /* напрям погляду (зсув очей) */
 static float g_ox, g_oy;      /* дрейф усього обличчя (проти вигоряння) */
 static float g_mw = 70, g_mh = 16; /* розмір рота */
+static float g_es = 1;        /* масштаб висоти очей (емоції: здивування/усмішка) */
 
 static void face_render(void)
 {
     int cx = 120 + (int)g_ox;
     int ey = EYE_CY + (int)g_oy + (int)g_ly;
     int lx = (int)g_lx;
-    int hl = (int)(EYE_H * (1 - g_bl)); if (hl < 4) hl = 4;
-    int hr = (int)(EYE_H * (1 - g_br)); if (hr < 4) hr = 4;
+    int hl = (int)(EYE_H * g_es * (1 - g_bl)); if (hl < 4) hl = 4;
+    int hr = (int)(EYE_H * g_es * (1 - g_br)); if (hr < 4) hr = 4;
     lv_obj_set_size(s_eye_l, EYE_W, hl);
     lv_obj_set_pos(s_eye_l, cx - EYE_CX - EYE_W / 2 + lx, ey - hl / 2);
     lv_obj_set_size(s_eye_r, EYE_W, hr);
@@ -199,6 +200,37 @@ static void e_ly(void *v, int32_t a) { g_ly = a; face_render(); }
 static void e_ox(void *v, int32_t a) { g_ox = a; face_render(); }
 static void e_oy(void *v, int32_t a) { g_oy = a; face_render(); }
 static void e_mw(void *v, int32_t a) { g_mw = a; g_mh = 10 + (a - 40) / 4; face_render(); }
+/* композитні емоції: один прогрес 0..1000 керує кількома параметрами */
+static void e_surprise(void *v, int32_t a)   /* очі більшають, рот — «О» */
+{
+    float p = a / 1000.0f;
+    g_es = 1 + 0.45f * p;
+    g_mw = 70 - 40 * p;
+    g_mh = 16 + 24 * p;
+    face_render();
+}
+static void e_happy(void *v, int32_t a)      /* очі мружаться, рот — широка усмішка */
+{
+    float p = a / 1000.0f;
+    g_es = 1 - 0.5f * p;
+    g_mw = 70 + 34 * p;
+    g_mh = 16 - 8 * p;
+    face_render();
+}
+
+/* швидке подвійне кліпання */
+static void blink_double(void)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, &g_bl);
+    lv_anim_set_exec_cb(&a, e_bb);
+    lv_anim_set_values(&a, 0, 1000);
+    lv_anim_set_duration(&a, 60);
+    lv_anim_set_playback_duration(&a, 80);
+    lv_anim_set_repeat_count(&a, 2);
+    lv_anim_start(&a);
+}
 
 static void anim1(void *var, lv_anim_exec_xcb_t cb, int32_t from, int32_t to,
                   uint32_t t, uint32_t pb, lv_anim_path_cb_t path)
@@ -217,23 +249,32 @@ static void anim1(void *var, lv_anim_exec_xcb_t cb, int32_t from, int32_t to,
 static void face_tick(lv_timer_t *t)
 {
     uint32_t r = esp_random() % 100;
-    if (r < 28) {                         /* кліпання обома */
+    if (r < 22) {                         /* кліпання обома */
         anim1(&g_bl, e_bb, 0, 1000, 70, 110, NULL);
-    } else if (r < 36) {                  /* підморгування одним */
+    } else if (r < 30) {                  /* підморгування одним */
         if (esp_random() & 1) anim1(&g_bl, e_bl, 0, 1000, 80, 130, NULL);
         else anim1(&g_br, e_br, 0, 1000, 80, 130, NULL);
-    } else if (r < 56) {                  /* глянути кудись */
+    } else if (r < 46) {                  /* глянути кудись */
         int tx = (int)(esp_random() % 37) - 18;
         int ty = (int)(esp_random() % 21) - 10;
         anim1(&g_lx, e_lx, (int)g_lx, tx, 260, 0, lv_anim_path_ease_out);
         anim1(&g_ly, e_ly, (int)g_ly, ty, 260, 0, lv_anim_path_ease_out);
-    } else if (r < 70) {                  /* повернути погляд у центр */
+    } else if (r < 58) {                  /* повернути погляд у центр */
         anim1(&g_lx, e_lx, (int)g_lx, 0, 300, 0, lv_anim_path_ease_out);
         anim1(&g_ly, e_ly, (int)g_ly, 0, 300, 0, lv_anim_path_ease_out);
-    } else if (r < 85) {                  /* «розмова» ротом */
+    } else if (r < 72) {                  /* «розмова» ротом */
         anim1(&g_mw, e_mw, 45, 60 + esp_random() % 36, 150, 190, NULL);
-    } else {                              /* примружитись */
+    } else if (r < 80) {                  /* примружитись */
         anim1(&g_bl, e_bb, 0, 500, 200, 450, lv_anim_path_ease_in_out);
+    } else if (r < 87) {                  /* здивування: очі ширші, рот «О» */
+        anim1(&g_es, e_surprise, 0, 1000, 200, 520, lv_anim_path_ease_out);
+    } else if (r < 93) {                  /* усмішка: примружені очі + широкий рот */
+        anim1(&g_es, e_happy, 0, 1000, 260, 650, lv_anim_path_ease_in_out);
+    } else if (r < 97) {                  /* радісне подвійне кліпання */
+        blink_double();
+    } else {                              /* зацікавлений погляд угору */
+        anim1(&g_ly, e_ly, (int)g_ly, -12, 240, 700, lv_anim_path_ease_out);
+        anim1(&g_mw, e_mw, 45, 54, 240, 700, NULL);
     }
     lv_timer_set_period(t, 500 + esp_random() % 1500);
 }
@@ -273,7 +314,7 @@ static void show_home(void)
     s_mouth = make_face_el(scr, 12);
     /* скинути динамічні параметри */
     g_bl = g_br = g_lx = g_ly = g_ox = g_oy = 0;
-    g_mw = 70; g_mh = 16;
+    g_mw = 70; g_mh = 16; g_es = 1;
     face_render();
 
     /* годинник (24г) угорі */
@@ -371,6 +412,8 @@ static void home_leave(void)
 
 #define CARD_W 240
 static lv_obj_t *s_track, *s_menu_wifi, *s_menu_bat, *s_menu_clock;
+static lv_obj_t *s_icons[N_APPS];   /* іконки карток за видимим індексом */
+static int s_anim_k = -1;           /* яка іконка зараз пульсує (-1 = жодна) */
 static lv_timer_t *s_menu_timer;
 
 static void menu_wifi_tick(lv_timer_t *t)
@@ -544,6 +587,34 @@ static lv_obj_t *make_app_icon(lv_obj_t *parent, int idx)
 /* --- анімація свайпу --- */
 static void track_exec(void *v, int32_t x) { lv_obj_set_x(s_track, x); }
 
+/* --- пульсація вибраної іконки --- */
+static void icon_scale_exec(void *v, int32_t s)
+{
+    lv_obj_set_style_transform_scale((lv_obj_t *)v, s, 0);
+}
+
+/* Зупинити пульс на попередній іконці й запустити на картці k. */
+static void menu_anim_select(int k)
+{
+    if (s_anim_k >= 0 && s_anim_k < s_nvis && s_icons[s_anim_k]) {
+        lv_anim_delete(s_icons[s_anim_k], icon_scale_exec);
+        lv_obj_set_style_transform_scale(s_icons[s_anim_k], 256, 0);  /* 100% */
+    }
+    s_anim_k = k;
+    if (k < 0 || k >= s_nvis || !s_icons[k]) return;
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_icons[k]);
+    lv_anim_set_exec_cb(&a, icon_scale_exec);
+    lv_anim_set_values(&a, 256, 300);           /* 100% -> ~117% і назад */
+    lv_anim_set_duration(&a, 650);
+    lv_anim_set_playback_duration(&a, 650);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_start(&a);
+}
+
 static void menu_slide(void)
 {
     lv_anim_t a;
@@ -586,6 +657,7 @@ static void show_menu(void)
     s_menu_timer = lv_timer_create(menu_wifi_tick, 1000, NULL);
 
     menu_build_vis();               /* застосувати кастомізацію меню */
+    s_anim_k = -1;                  /* екран очищено — старих анімацій немає */
 
     /* доріжка карусельних карток */
     s_track = lv_obj_create(scr);
@@ -609,6 +681,9 @@ static void show_menu(void)
 
         lv_obj_t *ic = make_app_icon(card, i);
         lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 24);
+        lv_obj_set_style_transform_pivot_x(ic, 32, 0);   /* масштаб від центру */
+        lv_obj_set_style_transform_pivot_y(ic, 32, 0);
+        s_icons[k] = ic;
 
         lv_obj_t *l = lv_label_create(card);
         lv_label_set_text(l, APPS[i]->name);
@@ -623,6 +698,8 @@ static void show_menu(void)
     lv_label_set_text(hint, "<  центр — відкрити  >");   /* наш кириличний шрифт */
     lv_obj_set_style_text_color(hint, lv_color_hex(0x3A4550), 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -6);
+
+    menu_anim_select(s_menu_sel);   /* пульс на поточній іконці */
 }
 
 /* ---------------- перемикання ---------------- */
@@ -755,8 +832,8 @@ static void buttons_poll_cb(lv_timer_t *t)
             show_menu();
             break;
         case SCR_MENU:
-            if (i == BTN_LEFT_ID) { if (s_menu_sel > 0) s_menu_sel--; menu_slide(); }
-            else if (i == BTN_RIGHT_ID) { if (s_menu_sel < s_nvis - 1) s_menu_sel++; menu_slide(); }
+            if (i == BTN_LEFT_ID) { if (s_menu_sel > 0) s_menu_sel--; menu_slide(); menu_anim_select(s_menu_sel); }
+            else if (i == BTN_RIGHT_ID) { if (s_menu_sel < s_nvis - 1) s_menu_sel++; menu_slide(); menu_anim_select(s_menu_sel); }
             else { int idx = s_vis[s_menu_sel]; menu_leave(); open_app(idx); }
             break;
         case SCR_APP:
