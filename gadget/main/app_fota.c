@@ -353,19 +353,6 @@ static void render_info(void)
     }
 
     /* підказка навігації */
-    lv_obj_t *hint = lv_label_create(s_root);
-    const char *h = "";
-    if (en && s_notes[0]) {
-        h = (s_sel == 0) ? "Центр — опис,  + до кнопки"
-                         : "Центр — оновити,  - до опису";
-    } else if (en) {
-        h = "Центр — оновити";
-    } else if (s_chk == 3 && netcfg_is_connected()) {
-        h = "Центр — повторити";
-    }
-    lv_label_set_text(hint, h);
-    lv_obj_set_style_text_color(hint, lv_color_hex(0x3A4550), 0);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -44);
 }
 
 /* повноекранний опис релізу з прокруткою (+/- гортають, центр — назад) */
@@ -393,6 +380,9 @@ static void render_notes(void)
     lv_obj_set_style_pad_all(sc, 8, 0);
     lv_obj_set_scroll_dir(sc, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(sc, LV_SCROLLBAR_MODE_ON);
+    /* без «пружного» виходу за межі та інерції — скрол строго в межах тексту */
+    lv_obj_clear_flag(sc, LV_OBJ_FLAG_SCROLL_ELASTIC);
+    lv_obj_clear_flag(sc, LV_OBJ_FLAG_SCROLL_MOMENTUM);
     s_notes_scroll = sc;
 
     lv_obj_t *txt = lv_label_create(sc);
@@ -528,11 +518,15 @@ static void fota_btn(int btn)
     }
 
     if (s_view == 1) {                           /* повноекранний опис релізу */
-        if (btn == BTN_RIGHT_ID && s_notes_scroll)
-            lv_obj_scroll_by(s_notes_scroll, 0, -48, LV_ANIM_ON);   /* + вниз */
-        else if (btn == BTN_LEFT_ID && s_notes_scroll)
-            lv_obj_scroll_by(s_notes_scroll, 0, 48, LV_ANIM_ON);    /* - вгору */
-        else if (btn == BTN_MID_ID) { s_view = 0; render_info(); } /* назад */
+        if (btn == BTN_RIGHT_ID && s_notes_scroll) {        /* + вниз */
+            int room = lv_obj_get_scroll_bottom(s_notes_scroll);   /* лишилось донизу */
+            if (room > 0) lv_obj_scroll_by(s_notes_scroll, 0,
+                                           -(room < 48 ? room : 48), LV_ANIM_ON);
+        } else if (btn == BTN_LEFT_ID && s_notes_scroll) {  /* - вгору */
+            int room = lv_obj_get_scroll_top(s_notes_scroll);      /* лишилось догори */
+            if (room > 0) lv_obj_scroll_by(s_notes_scroll, 0,
+                                           (room < 48 ? room : 48), LV_ANIM_ON);
+        } else if (btn == BTN_MID_ID) { s_view = 0; render_info(); } /* назад */
         return;
     }
 
