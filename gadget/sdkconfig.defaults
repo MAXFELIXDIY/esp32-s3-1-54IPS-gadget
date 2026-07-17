@@ -4,6 +4,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
+# FOTA: автоматичний відкат на попередній слот, якщо нова прошивка не
+# підтвердить свою працездатність (esp_ota_mark_app_valid_cancel_rollback).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # 8 MB octal PSRAM (ESP32-S3 R8)
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y

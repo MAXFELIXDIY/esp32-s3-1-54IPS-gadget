@@ -20,6 +20,7 @@ idf_component_register(SRCS "main.c"
                             "app_calc.c"
                             "app_modules.c"
                             "app_light.c"
+                            "app_fota.c"
                             "fonts/font_ua_16.c"
                             "fonts/font_ua_20.c"
                             "fonts/font_num_34.c"
@@ -29,7 +30,14 @@ idf_component_register(SRCS "main.c"
                                      esp_driver_gpio
                                      esp_driver_ledc esp_driver_spi esp_lcd
                                      esp_driver_i2s esp_timer
-                                     spi_flash app_update)
+                                     spi_flash app_update esp_https_ota)
+
+# Разова провізія секретів у NVS: idf.py build -DPROVISION_SECRETS=1
+# додає C-define PROVISION_SECRETS (лише тоді settings.c включає groq_key.h і
+# засіває ключ у NVS). Звичайна збірка (без прапора або =0) — без секретів.
+if(PROVISION_SECRETS)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE PROVISION_SECRETS=1)
+endif()
 
 # Дозволяємо перевизначити ieee80211_raw_frame_sanity_check (сильний символ у
 # libnet80211) власною версією у netcfg.c — потрібно для інʼєкції deauth-кадрів.

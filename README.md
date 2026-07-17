@@ -81,11 +81,19 @@ cp main/groq_key.h.example main/groq_key.h
 #    → вставте ключ Groq з https://console.groq.com/keys (для асистента)
 #    Wi-Fi у gadget вводиться з пристрою (Налаштування → Wi-Fi), файл не потрібен.
 
-# 2. Збірка і прошивка (порт зазвичай /dev/cu.usbmodemXXXX або /dev/ttyACM0):
+# 2. Разова «провізія» секретів у NVS (ключ Groq у бінарник НЕ потрапляє):
 . $IDF_PATH/export.sh
 idf.py set-target esp32s3
-idf.py -p <ПОРТ> flash monitor
+idf.py build -DPROVISION_SECRETS=1 && idf.py -p <ПОРТ> flash   # запис ключа в NVS
+
+# 3. Звичайна збірка/прошивка (без секретів — саме її публікуємо для FOTA):
+idf.py build -DPROVISION_SECRETS=0 && idf.py -p <ПОРТ> flash monitor
 ```
+
+> **Безпека:** ключ Groq зберігається в NVS, а не в прошивці. Звичайна збірка
+> (`-DPROVISION_SECRETS=0`) не містить токенів — її можна безпечно публікувати
+> для оновлень по Wi-Fi. Ключ у NVS переживає всі OTA-оновлення. Провізію
+> (крок 2) достатньо зробити один раз (або при зміні ключа).
 
 Перше складання підтягне залежності (LVGL 9, Helix MP3, led_strip) через ESP-IDF
 Component Manager автоматично.
@@ -151,6 +159,14 @@ Component Manager автоматично.
     S.P.E.C.I.A.L. / SKILLS / DATA, анімований маскот, «живі» дані плати.
   - **SD-зонд** (`app_sdprobe.c`) — визначення пінів microSD-слота
     bit-bang-перебором (CMD0+CMD8).
+  - **Оновлення / FOTA** (`app_fota.c`) — оновлення прошивки через Wi-Fi.
+    Іконка — хмара зі стрілкою вниз. Показує активний OTA-слот, версію та
+    дату збірки, стан Wi-Fi. Центр — завантажити образ у неактивний слот
+    (`esp_https_ota`) з прогрес-баром; після успіху — ребут у нову прошивку.
+    URL образу — стабільне посилання на `gadget.bin` з latest GitHub-релізу
+    (зберігається в NVS, `FOTA_URL_DEFAULT` у `settings.c`). Автоматичний
+    **відкат** на попередній слот, якщо нова прошивка не стартує. Докладніше —
+    розділ «FOTA / оновлення по Wi-Fi» нижче.
   - **Налаштування** (`app_settings.c`) — див. нижче.
 
   **Налаштування:** Wi-Fi (пошук/клавіатура/збережені мережі з ✓), Яскравість,
@@ -168,6 +184,24 @@ Component Manager автоматично.
   повністю деініціалізовано (`esp_wifi_deinit`); автозгасання підсвітки з
   таймаутами за екраном (див. вище).
 
+  **FOTA / оновлення по Wi-Fi:**
+  - **Таблиця розділів** (`gadget/partitions.csv`): замість одного `factory`
+    8 МБ — два OTA-слоти по 4 МБ (`ota_0` @ 0x20000, `ota_1` @ 0x420000) +
+    `otadata` (8 КБ). Прошивка ~1.8 МБ, у слоті вільно ~57 %.
+    Flash 16 МБ, `CONFIG_ESPTOOLPY_FLASHSIZE_16MB`.
+  - **Механізм:** `esp_https_ota` качає образ у неактивний слот, перемикає
+    `otadata`, пристрій вантажиться в новий слот. Перший прошив (нова таблиця
+    розділів) — по кабелю; далі — по Wi-Fi.
+  - **Відкат при збої** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`): нова прошивка
+    стартує в стані `PENDING_VERIFY`; у `app_main` після успішного старту UI
+    викликається `esp_ota_mark_app_valid_cancel_rollback()`. Якщо прошивка не
+    дійшла до цього (крах/бут-петля) — bootloader відкочується на попередній
+    робочий слот.
+  - **Джерело образу:** GitHub Releases, стабільне посилання
+    `releases/latest/download/gadget.bin` (у прошивці не змінюється між
+    релізами). Випуск оновлення: підняти `gadget/version.txt` → `idf.py build`
+    → `gh release create vX.Y.Z build/gadget.bin --latest`.
+
 ### Непомітні граблі (важливо!)
 - **LVGL `lv_label_set_text_fmt` НЕ підтримує `%f`** — float форматувати
   стандартним `snprintf`, тоді `lv_label_set_text`. Інакше числа не видно.
@@ -181,6 +215,11 @@ Component Manager автоматично.
   шрифтом (`&lv_font_montserrat_14`), не нашим кириличним.
 - **HTTP TX-буфер** для довгих URL (TTS ~700 символів) підняти до 2048,
   інакше `HTTP_CLIENT: Out of buffer`.
+- **FOTA з GitHub Releases — підняти ОБИДВА буфери HTTP-клієнта до 4096**
+  (`buffer_size` і `buffer_size_tx` у `app_fota.c`). Редіректи GitHub несуть
+  підписаний URL із JWT (~1 КБ): він і в заголовку `Location` (RX), і в рядку
+  запиту `GET` до `release-assets.githubusercontent.com` (TX). Зі стандартними
+  512 Б `esp_https_ota_begin` падає з `ESP_FAIL` / `HTTP_CLIENT: Out of buffer`.
 - **Батарея:** ADC2 канал 6 (GPIO17), заряджання GPIO38; ADC2 ділиться з
   Wi-Fi, читати рідко й стійко до збоїв (`battery.c`).
 - `radio/` — **інтернет-радіо** (працює): HTTP MP3-стрім → буфер 160 КБ у
