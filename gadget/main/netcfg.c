@@ -265,8 +265,14 @@ void netcfg_raw_begin(const uint8_t bssid[6], uint8_t channel)
     s_atk_chan = channel;
     s_n_clients = 0;
 
+    /* явно ловимо і керуючі, і DATA-кадри: клієнт найчастіше «світиться» саме
+       в data-кадрах (заголовок 802.11 не шифрується, адреси видно) */
+    wifi_promiscuous_filter_t filt = {
+        .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA,
+    };
     esp_wifi_set_promiscuous_rx_cb(sniff_cb);
     esp_wifi_set_promiscuous(true);
+    esp_wifi_set_promiscuous_filter(&filt);
     esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 }
 

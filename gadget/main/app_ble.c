@@ -34,6 +34,8 @@ static bool s_frozen;                 /* пошук завершено, спис
 static lv_obj_t *s_title, *s_root, *s_spinner;
 static lv_obj_t *s_rows[BLE_MAX_DEVS];
 static lv_obj_t *s_nums[BLE_MAX_DEVS];
+static lv_obj_t *s_names[BLE_MAX_DEVS];   /* мітка назви/MAC — оновлюємо на місці */
+static lv_obj_t *s_rssis[BLE_MAX_DEVS];   /* мітка RSSI — оновлюємо на місці */
 static int s_built_n = -1;            /* скільки рядків зараз побудовано */
 static lv_timer_t *s_timer;
 static lv_timer_t *s_click;           /* одноразовий для детекту подвійного кліку */
@@ -82,6 +84,71 @@ static const char *ad_type_name(uint8_t t)
     case 0x19: return "Вигляд";
     case 0xFF: return "Mfg Data";
     default:   return "?";
+    }
+}
+
+/* виробник за Company ID (найпоширеніші) */
+static const char *vendor_name(uint16_t c)
+{
+    switch (c) {
+    case 0x004C: return "Apple";
+    case 0x0006: return "Microsoft";
+    case 0x00E0: return "Google";
+    case 0x0075: return "Samsung";
+    case 0x0059: return "Nordic";
+    case 0x000D: return "Texas Instr.";
+    case 0x0087: return "Garmin";
+    case 0x0157: return "Amazfit/Huami";
+    case 0x038F: return "Xiaomi";
+    case 0x0171: return "Amazon";
+    case 0x0499: return "Ruuvi";
+    case 0x0001: return "Ericsson";
+    case 0x0118: return "Tile";
+    default:     return NULL;
+    }
+}
+
+/* назва відомого 16-бітного UUID (сервіси/маяки) */
+static const char *uuid16_name(uint16_t u)
+{
+    switch (u) {
+    case 0x1800: return "Generic Access";
+    case 0x1801: return "Generic Attribute";
+    case 0x180A: return "Device Info";
+    case 0x180F: return "Батарея";
+    case 0x180D: return "Пульс";
+    case 0x1809: return "Термометр";
+    case 0x181A: return "Середовище";
+    case 0x1812: return "HID (клавіатура/миша)";
+    case 0x1811: return "Сповіщення";
+    case 0x110A: case 0x110B: return "Аудіо (A2DP)";
+    case 0x111E: return "Hands-Free";
+    case 0xFEAA: return "Eddystone (маяк)";
+    case 0xFD6F: return "Exposure Notification";
+    case 0xFE9F: return "Google";
+    case 0xFE95: return "Xiaomi";
+    default:     return NULL;
+    }
+}
+
+/* категорія «вигляду» (Appearance) — старші біти = категорія */
+static const char *appearance_name(uint16_t v)
+{
+    switch (v >> 6) {
+    case 1:  return "Телефон";
+    case 2:  return "Комп'ютер";
+    case 3:  return "Годинник";
+    case 5:  return "Дисплей";
+    case 6:  return "Пульт";
+    case 7:  return "Окуляри";
+    case 8:  return "Тег/мітка";
+    case 10: return "Медіаплеєр";
+    case 13: return "Датчик пульсу";
+    case 15: return "HID";
+    case 17: return "Датчик руху";
+    case 18: return "Велодатчик";
+    case 49: return "Навушники";
+    default: return NULL;
     }
 }
 
@@ -184,6 +251,7 @@ static void list_build(void)
         lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_color(nm, lv_color_hex(0xE8ECF0), 0);
         lv_obj_align(nm, LV_ALIGN_LEFT_MID, 28, 0);
+        s_names[i] = nm;
 
         lv_obj_t *rs = lv_label_create(row);
         lv_label_set_text_fmt(rs, "%d", s_buf[i].rssi);
@@ -191,9 +259,26 @@ static void list_build(void)
             lv_color_hex(s_buf[i].rssi > -60 ? 0x4ADE80 :
                          s_buf[i].rssi > -80 ? 0xFACC15 : 0xF87171), 0);
         lv_obj_align(rs, LV_ALIGN_RIGHT_MID, 0, 0);
+        s_rssis[i] = rs;
     }
     s_built_n = s_n;
     if (s_sel < s_n) lv_obj_scroll_to_view(s_rows[s_sel], LV_ANIM_OFF);
+}
+
+/* оновити назву/RSSI наявних рядків БЕЗ перебудови (стабільний порядок) —
+   щоб пізні назви зі scan-response і зміни сигналу з’являлися без «стрибків» */
+static void list_refresh(void)
+{
+    for (int i = 0; i < s_built_n && i < s_n; i++) {
+        const uint8_t *a = s_buf[i].addr;
+        if (s_buf[i].name[0]) lv_label_set_text(s_names[i], s_buf[i].name);
+        else lv_label_set_text_fmt(s_names[i], "%02X:%02X:%02X:%02X:%02X:%02X",
+                                   a[5], a[4], a[3], a[2], a[1], a[0]);
+        lv_label_set_text_fmt(s_rssis[i], "%d", s_buf[i].rssi);
+        lv_obj_set_style_text_color(s_rssis[i],
+            lv_color_hex(s_buf[i].rssi > -60 ? 0x4ADE80 :
+                         s_buf[i].rssi > -80 ? 0xFACC15 : 0xF87171), 0);
+    }
 }
 
 static void list_tick(lv_timer_t *t)
@@ -223,6 +308,11 @@ static void list_tick(lv_timer_t *t)
         ble_scan_stop();                  /* час вийшов — фіксуємо список */
         s_frozen = true;
         s_n = ble_dev_snapshot(s_buf, BLE_MAX_DEVS);
+        /* єдине сортування за RSSI — на зафіксованому списку (порядок далі не міняється) */
+        for (int i = 1; i < s_n; i++)
+            for (int j = i; j > 0 && s_buf[j].rssi > s_buf[j - 1].rssi; j--) {
+                ble_dev_t t = s_buf[j]; s_buf[j] = s_buf[j - 1]; s_buf[j - 1] = t;
+            }
         if (s_sel >= s_n) s_sel = s_n ? s_n - 1 : 0;
         lv_label_set_text_fmt(s_title, "BLE (%d)", s_n);
         list_build();
@@ -232,7 +322,8 @@ static void list_tick(lv_timer_t *t)
     s_n = ble_dev_snapshot(s_buf, BLE_MAX_DEVS);
     if (s_sel >= s_n) s_sel = s_n ? s_n - 1 : 0;
     lv_label_set_text_fmt(s_title, "Пошук... %d", s_n);
-    if (s_n != s_built_n) list_build();   /* перебудова лише коли додались нові */
+    if (s_n != s_built_n) list_build();   /* нові пристрої — перебудова (порядок стабільний) */
+    else list_refresh();                  /* та сама кількість — лише оновити текст на місці */
 }
 
 static void new_search(void)
@@ -279,10 +370,31 @@ static void show_detail(void)
     lv_obj_set_style_text_color(rs, lv_color_hex(0xC0C8D0), 0);
 
     lv_obj_t *co = lv_label_create(s_root);
-    if (s_target.company != 0xFFFF)
+    const char *vn = (s_target.company != 0xFFFF) ? vendor_name(s_target.company) : NULL;
+    if (vn) lv_label_set_text_fmt(co, "Виробник: %s (0x%04X)", vn, s_target.company);
+    else if (s_target.company != 0xFFFF)
         lv_label_set_text_fmt(co, "Виробник: 0x%04X", s_target.company);
     else lv_label_set_text(co, "Виробник: —");
     lv_obj_set_style_text_color(co, lv_color_hex(0xC0C8D0), 0);
+
+    /* iBeacon (Apple mfg 0x004C, тип 0x02 0x15): UUID + major/minor + TX */
+    for (int i = 0; i + 1 < s_target.adv_len; ) {
+        int L = s_target.adv[i];
+        if (L == 0 || i + 1 + L > s_target.adv_len) break;
+        const uint8_t *d = &s_target.adv[i + 2];
+        int dl = L - 1;
+        if (s_target.adv[i + 1] == 0xFF && dl >= 25 &&
+            d[0] == 0x4C && d[1] == 0x00 && d[2] == 0x02 && d[3] == 0x15) {
+            char v[96];
+            snprintf(v, sizeof(v),
+                "%02X%02X%02X%02X-%02X%02X-…-%02X%02X\nmajor %d  minor %d  @%d dBm",
+                d[4], d[5], d[6], d[7], d[8], d[9], d[18], d[19],
+                (d[20] << 8) | d[21], (d[22] << 8) | d[23], (int8_t)d[24]);
+            kv_card("iBeacon", 0x4ADE80, v);
+            break;
+        }
+        i += 1 + L;
+    }
 
     /* --- сирі байти реклами + розбір AD-структур --- */
     char hx[3 * BLE_ADV_MAX + 4];
@@ -291,17 +403,63 @@ static void show_detail(void)
     snprintf(cap, sizeof(cap), "Реклама (%d Б)", s_target.adv_len);
     kv_card(cap, 0x35C4F0, hx[0] ? hx : "—");
 
-    /* прохід TLV: [len][type][data...] */
+    /* прохід TLV: [len][type][data...] — з дружньою розшифровкою відомих типів */
     for (int i = 0; i + 1 < s_target.adv_len; ) {
         int L = s_target.adv[i];
         if (L == 0 || i + 1 + L > s_target.adv_len) break;
         uint8_t type = s_target.adv[i + 1];
         const uint8_t *d = &s_target.adv[i + 2];
         int dl = L - 1;
-        char key[40], val[3 * 32 + 8];
+        char key[40], val[3 * 32 + 40];
+        bool done = false;
+        switch (type) {
+        case 0x02: case 0x03: {            /* список 16-бітних UUID сервісів */
+            int p = 0;
+            for (int k = 0; k + 1 < dl && p < (int)sizeof(val) - 28; k += 2) {
+                uint16_t u = d[k] | (d[k + 1] << 8);
+                const char *nm = uuid16_name(u);
+                p += snprintf(val + p, sizeof(val) - p, "%s%04X%s%s",
+                              p ? ", " : "", u, nm ? " " : "", nm ? nm : "");
+            }
+            done = p > 0; break;
+        }
+        case 0x0A:                         /* потужність передавача */
+            if (dl >= 1) { snprintf(val, sizeof(val), "%d dBm", (int8_t)d[0]); done = true; }
+            break;
+        case 0x19:                         /* вигляд пристрою */
+            if (dl >= 2) {
+                uint16_t ap = d[0] | (d[1] << 8);
+                const char *an = appearance_name(ap);
+                snprintf(val, sizeof(val), "%s (0x%04X)", an ? an : "?", ap);
+                done = true;
+            }
+            break;
+        case 0x16:                         /* service data: перші 2 байти — UUID */
+            if (dl >= 2) {
+                uint16_t u = d[0] | (d[1] << 8);
+                const char *nm = uuid16_name(u);
+                char h[3 * 20];
+                hex_str(d + 2, dl - 2 > 18 ? 18 : dl - 2, h, sizeof(h));
+                snprintf(val, sizeof(val), "%s: %s", nm ? nm : "UUID", h);
+                done = true;
+            }
+            break;
+        case 0xFF: {                       /* дані виробника: підпис + hex */
+            const char *v = dl >= 2 ? vendor_name(d[0] | (d[1] << 8)) : NULL;
+            char h[3 * 22];
+            hex_str(d, dl > 20 ? 20 : dl, h, sizeof(h));
+            if (v) snprintf(val, sizeof(val), "%s: %s", v, h);
+            else   snprintf(val, sizeof(val), "%s", h);
+            done = true;
+            break;
+        }
+        default: break;
+        }
+        if (!done) {
+            if (type == 0x08 || type == 0x09) ascii_str(d, dl, val, sizeof(val));
+            else hex_str(d, dl > 31 ? 31 : dl, val, sizeof(val));
+        }
         snprintf(key, sizeof(key), "0x%02X %s", type, ad_type_name(type));
-        if (type == 0x08 || type == 0x09) ascii_str(d, dl, val, sizeof(val));
-        else hex_str(d, dl > 31 ? 31 : dl, val, sizeof(val));
         kv_card(key, 0x8A94A0, val[0] ? val : "—");
         i += 1 + L;
     }

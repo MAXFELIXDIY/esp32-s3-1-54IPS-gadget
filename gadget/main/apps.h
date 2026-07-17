@@ -25,6 +25,11 @@ extern const app_t app_settings;
 extern const app_t app_gemini;
 extern const app_t app_ble;
 extern const app_t app_wifitools;
+extern const app_t app_sdprobe;
+extern const app_t app_pet;
+extern const app_t app_pipboy;
+extern const app_t app_calendar;
+extern const app_t app_calc;
 extern const app_t app_modules;
 extern const app_t app_light;
 

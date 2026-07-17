@@ -55,6 +55,15 @@ static int scan_cb(struct ble_gap_event *ev, void *arg)
     if (idx < 0 && name[0])
         for (int i = 0; i < s_n_devs; i++)
             if (!strcmp(s_devs[i].name, name)) { idx = i; break; }
+    /* 3) безіменні: збіг за ідентичним рекламним payload — маяки (iBeacon,
+       Eddystone) міняють випадкову адресу, але шлють той самий вміст */
+    if (idx < 0 && !name[0] && ev->disc.length_data > 0) {
+        uint8_t L = ev->disc.length_data < BLE_ADV_MAX ? ev->disc.length_data
+                                                       : BLE_ADV_MAX;
+        for (int i = 0; i < s_n_devs; i++)
+            if (!s_devs[i].name[0] && s_devs[i].adv_len == L &&
+                !memcmp(s_devs[i].adv, ev->disc.data, L)) { idx = i; break; }
+    }
     if (idx < 0 && s_n_devs < BLE_MAX_DEVS) idx = s_n_devs++;
     if (idx >= 0) {
         ble_dev_t *d = &s_devs[idx];
@@ -90,14 +99,14 @@ void ble_scan_stop(void)
 
 int ble_dev_snapshot(ble_dev_t *out, int max)
 {
+    /* Порядок ВИЯВЛЕННЯ (стабільний), без сортування за RSSI: інакше під час
+       живого сканування рядки перетасовуються щотіку, індекс вибору «з’їжджає»
+       на інший пристрій, і виникають візуальні дублікати. Сортування за
+       сигналом застосунок робить один раз, коли фіксує список. */
     portENTER_CRITICAL(&s_lock);
     int n = s_n_devs < max ? s_n_devs : max;
     memcpy(out, s_devs, sizeof(ble_dev_t) * n);
     portEXIT_CRITICAL(&s_lock);
-    for (int i = 1; i < n; i++)
-        for (int j = i; j > 0 && out[j].rssi > out[j - 1].rssi; j--) {
-            ble_dev_t t = out[j]; out[j] = out[j - 1]; out[j - 1] = t;
-        }
     return n;
 }
 
