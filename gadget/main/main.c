@@ -173,14 +173,15 @@ static float g_bl, g_br;      /* кліпання лівого/правого о
 static float g_lx, g_ly;      /* напрям погляду (зсув очей) */
 static float g_ox, g_oy;      /* дрейф усього обличчя (проти вигоряння) */
 static float g_mw = 70, g_mh = 16; /* розмір рота */
+static float g_es = 1;        /* масштаб висоти очей (емоції: здивування/усмішка) */
 
 static void face_render(void)
 {
     int cx = 120 + (int)g_ox;
     int ey = EYE_CY + (int)g_oy + (int)g_ly;
     int lx = (int)g_lx;
-    int hl = (int)(EYE_H * (1 - g_bl)); if (hl < 4) hl = 4;
-    int hr = (int)(EYE_H * (1 - g_br)); if (hr < 4) hr = 4;
+    int hl = (int)(EYE_H * g_es * (1 - g_bl)); if (hl < 4) hl = 4;
+    int hr = (int)(EYE_H * g_es * (1 - g_br)); if (hr < 4) hr = 4;
     lv_obj_set_size(s_eye_l, EYE_W, hl);
     lv_obj_set_pos(s_eye_l, cx - EYE_CX - EYE_W / 2 + lx, ey - hl / 2);
     lv_obj_set_size(s_eye_r, EYE_W, hr);
@@ -199,6 +200,37 @@ static void e_ly(void *v, int32_t a) { g_ly = a; face_render(); }
 static void e_ox(void *v, int32_t a) { g_ox = a; face_render(); }
 static void e_oy(void *v, int32_t a) { g_oy = a; face_render(); }
 static void e_mw(void *v, int32_t a) { g_mw = a; g_mh = 10 + (a - 40) / 4; face_render(); }
+/* композитні емоції: один прогрес 0..1000 керує кількома параметрами */
+static void e_surprise(void *v, int32_t a)   /* очі більшають, рот — «О» */
+{
+    float p = a / 1000.0f;
+    g_es = 1 + 0.45f * p;
+    g_mw = 70 - 40 * p;
+    g_mh = 16 + 24 * p;
+    face_render();
+}
+static void e_happy(void *v, int32_t a)      /* очі мружаться, рот — широка усмішка */
+{
+    float p = a / 1000.0f;
+    g_es = 1 - 0.5f * p;
+    g_mw = 70 + 34 * p;
+    g_mh = 16 - 8 * p;
+    face_render();
+}
+
+/* швидке подвійне кліпання */
+static void blink_double(void)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, &g_bl);
+    lv_anim_set_exec_cb(&a, e_bb);
+    lv_anim_set_values(&a, 0, 1000);
+    lv_anim_set_duration(&a, 60);
+    lv_anim_set_playback_duration(&a, 80);
+    lv_anim_set_repeat_count(&a, 2);
+    lv_anim_start(&a);
+}
 
 static void anim1(void *var, lv_anim_exec_xcb_t cb, int32_t from, int32_t to,
                   uint32_t t, uint32_t pb, lv_anim_path_cb_t path)
@@ -217,23 +249,32 @@ static void anim1(void *var, lv_anim_exec_xcb_t cb, int32_t from, int32_t to,
 static void face_tick(lv_timer_t *t)
 {
     uint32_t r = esp_random() % 100;
-    if (r < 28) {                         /* кліпання обома */
+    if (r < 22) {                         /* кліпання обома */
         anim1(&g_bl, e_bb, 0, 1000, 70, 110, NULL);
-    } else if (r < 36) {                  /* підморгування одним */
+    } else if (r < 30) {                  /* підморгування одним */
         if (esp_random() & 1) anim1(&g_bl, e_bl, 0, 1000, 80, 130, NULL);
         else anim1(&g_br, e_br, 0, 1000, 80, 130, NULL);
-    } else if (r < 56) {                  /* глянути кудись */
+    } else if (r < 46) {                  /* глянути кудись */
         int tx = (int)(esp_random() % 37) - 18;
         int ty = (int)(esp_random() % 21) - 10;
         anim1(&g_lx, e_lx, (int)g_lx, tx, 260, 0, lv_anim_path_ease_out);
         anim1(&g_ly, e_ly, (int)g_ly, ty, 260, 0, lv_anim_path_ease_out);
-    } else if (r < 70) {                  /* повернути погляд у центр */
+    } else if (r < 58) {                  /* повернути погляд у центр */
         anim1(&g_lx, e_lx, (int)g_lx, 0, 300, 0, lv_anim_path_ease_out);
         anim1(&g_ly, e_ly, (int)g_ly, 0, 300, 0, lv_anim_path_ease_out);
-    } else if (r < 85) {                  /* «розмова» ротом */
+    } else if (r < 72) {                  /* «розмова» ротом */
         anim1(&g_mw, e_mw, 45, 60 + esp_random() % 36, 150, 190, NULL);
-    } else {                              /* примружитись */
+    } else if (r < 80) {                  /* примружитись */
         anim1(&g_bl, e_bb, 0, 500, 200, 450, lv_anim_path_ease_in_out);
+    } else if (r < 87) {                  /* здивування: очі ширші, рот «О» */
+        anim1(&g_es, e_surprise, 0, 1000, 200, 520, lv_anim_path_ease_out);
+    } else if (r < 93) {                  /* усмішка: примружені очі + широкий рот */
+        anim1(&g_es, e_happy, 0, 1000, 260, 650, lv_anim_path_ease_in_out);
+    } else if (r < 97) {                  /* радісне подвійне кліпання */
+        blink_double();
+    } else {                              /* зацікавлений погляд угору */
+        anim1(&g_ly, e_ly, (int)g_ly, -12, 240, 700, lv_anim_path_ease_out);
+        anim1(&g_mw, e_mw, 45, 54, 240, 700, NULL);
     }
     lv_timer_set_period(t, 500 + esp_random() % 1500);
 }
@@ -273,7 +314,7 @@ static void show_home(void)
     s_mouth = make_face_el(scr, 12);
     /* скинути динамічні параметри */
     g_bl = g_br = g_lx = g_ly = g_ox = g_oy = 0;
-    g_mw = 70; g_mh = 16;
+    g_mw = 70; g_mh = 16; g_es = 1;
     face_render();
 
     /* годинник (24г) угорі */
