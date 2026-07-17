@@ -25,7 +25,7 @@
 #include "apps.h"
 #include "netcfg.h"
 #include "led.h"
-#include "groq_key.h"        /* ключ Groq (gsk_...) */
+#include "settings.h"        /* ключ Groq береться з NVS */
 
 static const char *TAG = "groq";
 
@@ -188,7 +188,9 @@ static bool groq_transcribe(uint8_t *wav, size_t wl, char *out, int outsz)
     char ct[96];
     snprintf(ct, sizeof(ct), "multipart/form-data; boundary=%s", B);
     esp_http_client_set_header(c, "Content-Type", ct);
-    esp_http_client_set_header(c, "Authorization", "Bearer " GROQ_KEY);
+    char auth[96];
+    snprintf(auth, sizeof(auth), "Bearer %s", settings_groq_key());
+    esp_http_client_set_header(c, "Authorization", auth);
 
     bool ok = false;
     if (esp_http_client_open(c, total) == ESP_OK) {
@@ -256,7 +258,9 @@ static bool groq_chat(const char *q, char *out, int outsz)
     };
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     esp_http_client_set_header(c, "Content-Type", "application/json");
-    esp_http_client_set_header(c, "Authorization", "Bearer " GROQ_KEY);
+    char auth[96];
+    snprintf(auth, sizeof(auth), "Bearer %s", settings_groq_key());
+    esp_http_client_set_header(c, "Authorization", auth);
 
     bool ok = false;
     if (esp_http_client_open(c, bl) == ESP_OK) {

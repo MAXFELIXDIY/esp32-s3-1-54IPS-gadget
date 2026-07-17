@@ -14,3 +14,11 @@ void settings_set_volume(int v);        /* застосовує + зберіга
 /* Видимість застосунку i в меню (бітова маска, за замовч. усі увімкнені). */
 bool settings_menu_visible(int i);
 void settings_menu_toggle(int i);       /* перемкнути й зберегти */
+
+/* URL образу прошивки для FOTA. Порожній рядок = не задано. */
+const char *settings_fota_url(void);
+void        settings_set_fota_url(const char *url); /* зберігає в NVS */
+
+/* Ключ Groq API. Зберігається в NVS (не в бінарнику). Порожній = не задано. */
+const char *settings_groq_key(void);
+void        settings_set_groq_key(const char *key); /* зберігає в NVS */

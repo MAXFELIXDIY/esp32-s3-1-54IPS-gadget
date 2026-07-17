@@ -20,6 +20,7 @@
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "lvgl.h"
 #include "apps.h"
 #include "netcfg.h"
@@ -119,7 +120,7 @@ static const app_t *const APPS[] = { &app_gemini, &app_weather, &app_radio,
                                      &app_news, &app_calendar, &app_calc,
                                      &app_ble, &app_wifitools, &app_modules,
                                      &app_light, &app_pet, &app_pipboy,
-                                     &app_sdprobe, &app_settings };
+                                     &app_sdprobe, &app_fota, &app_settings };
 #define GEMINI_IDX 0
 #define N_APPS (int)(sizeof(APPS) / sizeof(APPS[0]))
 static int s_menu_sel = 0;
@@ -520,6 +521,16 @@ static lv_obj_t *make_app_icon(lv_obj_t *parent, int idx)
         irect(ic, 4, 12, 1, IC_GY, 27, 16);
         irect(ic, 4, 12, 1, IC_GY, 34, 16);
         break;
+    case 13: /* FOTA — хмара зі стрілкою завантаження вниз */
+        idot(ic, 16, IC_CL, 12, 12);               /* ліва частина хмари */
+        idot(ic, 22, IC_CL, 22, 6);                /* верх хмари */
+        idot(ic, 16, IC_CL, 36, 12);               /* права частина хмари */
+        irect(ic, 40, 12, 6, IC_CL, 12, 18);       /* основа хмари */
+        irect(ic, 6, 18, 2, IC_ACC, 29, 28);       /* стрижень стрілки */
+        irect(ic, 22, 5, 1, IC_ACC, 21, 44);       /* вістря: широка смуга */
+        irect(ic, 14, 5, 1, IC_ACC, 25, 48);       /* вужча */
+        irect(ic, 6, 5, 1, IC_ACC, 29, 52);        /* кінчик */
+        break;
     default: /* Налаштування — повзунки */
         for (int k = 0; k < 3; k++) {
             irect(ic, 40, 4, 2, IC_GY, 12, 16 + k * 13);
@@ -798,6 +809,19 @@ void app_main(void)
 
     show_home();                 /* показує обличчя й вимикає Wi-Fi (сон) */
     lv_refr_now(s_disp);
+
+    /* FOTA rollback: якщо ми щойно завантажились у нову прошивку (стан
+       PENDING_VERIFY) і дійшли до робочого домашнього екрана — підтверджуємо
+       образ як робочий. Інакше при наступному ребуті bootloader відкотиться
+       на попередній слот. */
+    {
+        const esp_partition_t *run = esp_ota_get_running_partition();
+        esp_ota_img_states_t st;
+        if (run && esp_ota_get_state_partition(run, &st) == ESP_OK &&
+            st == ESP_OTA_IMG_PENDING_VERIFY) {
+            esp_ota_mark_app_valid_cancel_rollback();
+        }
+    }
 
     lv_timer_create(buttons_poll_cb, 25, NULL);
 
