@@ -116,8 +116,10 @@ static screen_t s_screen = SCR_HOME;
 static const app_t *s_app = NULL;
 
 static const app_t *const APPS[] = { &app_gemini, &app_weather, &app_radio,
-                                     &app_news, &app_ble, &app_wifitools,
-                                     &app_modules, &app_light, &app_settings };
+                                     &app_news, &app_calendar, &app_calc,
+                                     &app_ble, &app_wifitools, &app_modules,
+                                     &app_light, &app_pet, &app_pipboy,
+                                     &app_settings };
 #define GEMINI_IDX 0
 #define N_APPS (int)(sizeof(APPS) / sizeof(APPS[0]))
 static int s_menu_sel = 0;
@@ -439,27 +441,56 @@ static lv_obj_t *make_app_icon(lv_obj_t *parent, int idx)
         irect(ic, 30, 3, 1, IC_GY, 17, 37);
         irect(ic, 20, 3, 1, IC_GY, 17, 44);
         break;
-    case 4: /* BLE — сигнальні смуги */
+    case 6: /* BLE — сигнальні смуги */
         irect(ic, 7, 10, 2, IC_ACC, 15, 38);
         irect(ic, 7, 18, 2, IC_ACC, 27, 30);
         irect(ic, 7, 26, 2, IC_ACC, 39, 22);
         break;
-    case 5: /* Wi-Fi атака — радіохвилі */
+    case 7: /* Wi-Fi атака — радіохвилі */
         idot(ic, 8, IC_ACC, 28, 44);
         irect(ic, 18, 5, 2, IC_ACC, 23, 33);
         irect(ic, 30, 5, 2, IC_ACC, 17, 23);
         irect(ic, 42, 5, 2, IC_ACC, 11, 13);
         break;
-    case 6: /* Модулі — чіп */
+    case 8: /* Модулі — чіп */
         irect(ic, 34, 34, 4, IC_ACC, 15, 15);
         irect(ic, 14, 14, 2, 0x0B0F14, 25, 25);
         irect(ic, 4, 4, 0, IC_ACC, 9, 22); irect(ic, 4, 4, 0, IC_ACC, 9, 38);
         irect(ic, 4, 4, 0, IC_ACC, 51, 22); irect(ic, 4, 4, 0, IC_ACC, 51, 38);
         break;
-    case 7: /* Нічник — лампа */
+    case 9: /* Нічник — лампа */
         idot(ic, 26, IC_YE, 19, 6);
         irect(ic, 14, 8, 2, IC_GY, 25, 32);
         irect(ic, 10, 4, 1, IC_GY, 27, 40);
+        break;
+    case 10: /* Улюбленець — мордочка */
+        idot(ic, 12, IC_ACC, 12, 12);              /* ліве вушко */
+        idot(ic, 12, IC_ACC, 40, 12);              /* праве вушко */
+        idot(ic, 40, IC_ACC, 12, 18);              /* голова */
+        idot(ic, 7, 0x0B0F14, 22, 30);             /* очі */
+        idot(ic, 7, 0x0B0F14, 35, 30);
+        irect(ic, 8, 4, 2, 0x0B0F14, 28, 42);      /* рот */
+        break;
+    case 11: /* Pip-Boy — зелений екран із фігуркою */
+        irect(ic, 48, 48, 8, 0x2BE04A, 8, 8);      /* корпус/екран */
+        irect(ic, 38, 38, 4, 0x061A0C, 13, 13);    /* тло екрана */
+        idot(ic, 10, 0x2BE04A, 27, 18);            /* голова фігурки */
+        irect(ic, 12, 14, 3, 0x2BE04A, 26, 28);    /* тулуб */
+        break;
+    case 4: /* Календар — аркуш із сіткою */
+        irect(ic, 44, 42, 4, IC_CL, 10, 12);       /* аркуш */
+        irect(ic, 44, 12, 2, 0xF87171, 10, 12);    /* верхня смуга */
+        idot(ic, 4, IC_CL, 20, 6); idot(ic, 4, IC_CL, 40, 6);  /* кільця */
+        for (int gx = 0; gx < 3; gx++)
+            for (int gy = 0; gy < 2; gy++)
+                irect(ic, 8, 6, 1, IC_GY, 16 + gx * 12, 30 + gy * 10);
+        break;
+    case 5: /* Калькулятор — табло + кнопки */
+        irect(ic, 40, 48, 4, IC_CL, 12, 8);        /* корпус */
+        irect(ic, 30, 10, 1, 0x4ADE80, 17, 13);    /* табло */
+        for (int bx = 0; bx < 3; bx++)
+            for (int by = 0; by < 2; by++)
+                idot(ic, 6, IC_ACC, 17 + bx * 10, 30 + by * 10);  /* кнопки */
         break;
     default: /* Налаштування — повзунки */
         for (int k = 0; k < 3; k++) {
@@ -572,19 +603,25 @@ static void close_app(void)
 
 /* ---------------- кнопки ---------------- */
 
-/* ---- автозгасання підсвітки на простої ---- */
-#define BL_DIM_US 15000000LL   /* 15 с бездіяльності → притлумити */
-#define BL_OFF_US 60000000LL   /* 60 с → погасити екран */
+/* ---- автозгасання підсвітки на простої ----
+   таймаути залежать від екрана:
+   • головний (обличчя робота): тьмяніти/сон 60 с, гасити 300 с;
+   • меню та застосунки: тьмяніти 30 с, гасити 60 с. */
 static int64_t s_last_act;     /* час останнього натискання */
 static uint8_t s_bl_state;     /* 0=повна, 1=тьмяна, 2=вимкнена */
-static bool s_bl_swallow;      /* «ковтнути» клік, що розбудив з вимкненого екрана */
+static bool s_bl_swallow;      /* «ковтнути» клік, що лише розбудив екран */
+
+static int64_t bl_dim_us(void)  { return s_screen == SCR_HOME ?  60000000LL : 30000000LL; }
+static int64_t bl_off_us(void)  { return s_screen == SCR_HOME ? 300000000LL : 60000000LL; }
 
 /* натискання будь-якої кнопки: скинути таймер простою й відновити яскравість */
 static void bl_wake(void)
 {
     s_last_act = esp_timer_get_time();
     if (s_bl_state != 0) {
-        if (s_bl_state == 2) s_bl_swallow = true;  /* пробудження з OFF — цей клік не діє */
+        /* на головному екрані перший клік лише будить робота (дію не виконуємо);
+           у меню/застосунках ковтаємо клік лише коли будимо з вимкненого екрана */
+        if (s_bl_state == 2 || s_screen == SCR_HOME) s_bl_swallow = true;
         ui_backlight_set(settings_brightness());
         s_bl_state = 0;
         face_wake();                                /* робот прокидається */
@@ -607,11 +644,11 @@ static void buttons_poll_cb(lv_timer_t *t)
     /* керування яскравістю за простоєм */
     if (s_last_act == 0) s_last_act = now;
     int64_t idle = now - s_last_act;
-    if (s_bl_state == 0 && idle > BL_DIM_US) {
+    if (s_bl_state == 0 && idle > bl_dim_us()) {
         int d = settings_brightness() / 4; if (d < 8) d = 8;
         ui_backlight_set(d); s_bl_state = 1;         /* притлумити */
         if (s_screen == SCR_HOME) face_sleep();      /* робот засинає */
-    } else if (s_bl_state == 1 && idle > BL_OFF_US) {
+    } else if (s_bl_state == 1 && idle > bl_off_us()) {
         ui_backlight_set(0); s_bl_state = 2;         /* погасити */
         if (s_screen == SCR_HOME) face_off();
     }
