@@ -120,7 +120,8 @@ static const app_t *const APPS[] = { &app_gemini, &app_weather, &app_radio,
                                      &app_news, &app_calendar, &app_calc,
                                      &app_ble, &app_wifitools, &app_modules,
                                      &app_light, &app_pet, &app_pipboy,
-                                     &app_sdprobe, &app_fota, &app_settings };
+                                     &app_sdprobe, &app_fota, &app_gyro,
+                                     &app_settings };
 #define GEMINI_IDX 0
 #define N_APPS (int)(sizeof(APPS) / sizeof(APPS[0]))
 static int s_menu_sel = 0;
@@ -573,6 +574,13 @@ static lv_obj_t *make_app_icon(lv_obj_t *parent, int idx)
         irect(ic, 22, 5, 1, IC_ACC, 21, 44);       /* вістря: широка смуга */
         irect(ic, 14, 5, 1, IC_ACC, 25, 48);       /* вужча */
         irect(ic, 6, 5, 1, IC_ACC, 29, 52);        /* кінчик */
+        break;
+    case 14: /* Гіроскоп — кільце-гіроскоп із віссю */
+        idot(ic, 44, IC_CL, 10, 10);               /* зовнішнє кільце (обвід) */
+        idot(ic, 30, 0x0B0F14, 17, 17);             /* внутрішня «дірка» */
+        irect(ic, 4, 44, 2, IC_ACC, 30, 10);        /* вертикальна вісь */
+        irect(ic, 44, 4, 2, IC_ACC, 10, 30);        /* горизонтальна вісь */
+        idot(ic, 10, IC_ACC, 27, 27);               /* центр */
         break;
     default: /* Налаштування — повзунки */
         for (int k = 0; k < 3; k++) {

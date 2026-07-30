@@ -33,6 +33,7 @@ extern const app_t app_calc;
 extern const app_t app_modules;
 extern const app_t app_light;
 extern const app_t app_fota;
+extern const app_t app_gyro;
 
 /* керування підсвіткою (реалізовано в main.c) */
 void ui_backlight_set(uint8_t duty);
